@@ -46,17 +46,25 @@ async function loadPlugins() {
             const filePath = path.join(pluginsPath, file)
             const url = pathToFileURL(filePath).href
 
-            const module = await import(`${url}?update=${Date.now()}`)
+            const module = await import(
+                `${url}?update=${Date.now()}`
+            )
 
             if (module.default) {
                 global.plugins[file] = module.default
+
                 console.log(`✅ Plugin cargado: ${file}`)
             } else {
-                console.log(`⚠️ Plugin sin export default: ${file}`)
+                console.log(
+                    `⚠️ Plugin sin export default: ${file}`
+                )
             }
 
         } catch (error) {
-            console.error(`❌ Error cargando ${file}:`, error)
+            console.error(
+                `❌ Error cargando ${file}:`,
+                error
+            )
         }
     }
 }
@@ -64,16 +72,21 @@ async function loadPlugins() {
 await loadPlugins()
 
 export default async function handler(conn, update) {
+
     try {
+
         if (!update?.messages?.length) return
 
         for (const m of update.messages) {
+
             try {
+
                 if (!m?.message) continue
 
-                if (m.key?.remoteJid === 'status@broadcast') {
-                    continue
-                }
+                if (
+                    m.key?.remoteJid ===
+                    'status@broadcast'
+                ) continue
 
                 const message =
                     m.message.conversation ||
@@ -85,38 +98,49 @@ export default async function handler(conn, update) {
 
                 if (!message) continue
 
-                const prefixMatch = message.match(/^[#!./]/)
+                const prefixMatch =
+                    message.match(/^[#!./]/)
 
                 if (!prefixMatch) continue
 
-                const usedPrefix = prefixMatch[0]
+                const usedPrefix =
+                    prefixMatch[0]
 
-                const body = message
-                    .slice(usedPrefix.length)
-                    .trim()
+                const body =
+                    message
+                        .slice(usedPrefix.length)
+                        .trim()
 
                 if (!body) continue
 
-                const parts = body.split(/\s+/)
+                const parts =
+                    body.split(/\s+/)
 
-                const command = parts
-                    .shift()
-                    .toLowerCase()
+                const command =
+                    parts
+                        .shift()
+                        .toLowerCase()
 
-                const text = parts.join(' ')
+                const text =
+                    parts.join(' ')
 
                 console.log(
                     `[CMD] ${usedPrefix}${command}`,
                     text ? `| ${text}` : ''
                 )
 
-                for (const [filename, plugin] of Object.entries(global.plugins)) {
+                for (
+                    const [filename, plugin]
+                    of Object.entries(global.plugins)
+                ) {
+
                     if (!plugin) continue
 
-                    const matched = getCommandMatch(
-                        plugin,
-                        command
-                    )
+                    const matched =
+                        getCommandMatch(
+                            plugin,
+                            command
+                        )
 
                     if (!matched) continue
 
@@ -124,12 +148,16 @@ export default async function handler(conn, update) {
                         `🔧 Ejecutando plugin: ${filename}`
                     )
 
-                    const quotedMessage =
-                        m.message?.extendedTextMessage
+                    const contextInfo =
+                        m.message
+                            ?.extendedTextMessage
                             ?.contextInfo
-                            ?.quotedMessage
+
+                    const quotedMessage =
+                        contextInfo?.quotedMessage
 
                     const ctx = {
+
                         conn,
 
                         usedPrefix,
@@ -152,41 +180,80 @@ export default async function handler(conn, update) {
 
                         quoted: quotedMessage
                             ? {
-                                message: quotedMessage
+                                message:
+                                    quotedMessage
                             }
                             : null
                     }
 
                     /*
-                     * IMPORTANTE:
+                     * FORMATO NUEVO
                      *
-                     * Tus plugins usan:
-                     *
-                     * handler = async (m, { conn, ... })
-                     *
-                     * Por eso se pasan SOLO:
-                     *
-                     * 1. m
-                     * 2. ctx
+                     * export default {
+                     *     command: ['ping'],
+                     *     handler: async (m, { conn }) => {}
+                     * }
                      */
 
-                    await plugin.call(m, ctx)
+                    if (
+                        typeof plugin.handler ===
+                        'function'
+                    ) {
+
+                        await plugin.handler(
+                            m,
+                            ctx
+                        )
+
+                    }
+
+                    /*
+                     * COMPATIBILIDAD
+                     *
+                     * Por si algún plugin
+                     * exporta directamente
+                     * una función.
+                     */
+
+                    else if (
+                        typeof plugin ===
+                        'function'
+                    ) {
+
+                        await plugin(
+                            m,
+                            ctx
+                        )
+
+                    }
+
+                    else {
+
+                        console.log(
+                            `⚠️ ${filename} no tiene handler válido`
+                        )
+
+                    }
 
                     break
                 }
 
             } catch (error) {
+
                 console.error(
                     '❌ Error procesando mensaje:',
                     error
                 )
+
             }
         }
 
     } catch (error) {
+
         console.error(
             '❌ Error general del handler:',
             error
         )
+
     }
 }
