@@ -5,557 +5,215 @@ import { fileURLToPath, pathToFileURL } from 'url'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
-const pluginsPath = path.join(__dirname, 'plugins')
+const pluginFolder = path.join(__dirname, 'Plugins')
 
 global.plugins = global.plugins || {}
 
-
-/* =========================================================
-   COMPATIBILIDAD DE CONN
-   ========================================================= */
-
-function createCompatConn(conn) {
-
-    // conn.reply()
-    if (!conn.reply) {
-        conn.reply = async function (jid, text, quoted, options = {}) {
-
-            if (!jid) {
-                console.error('❌ conn.reply: jid undefined')
-                return
-            }
-
-            return await conn.sendMessage(
-                jid,
-                {
-                    text: String(text ?? ''),
-                    ...options
-                },
-                {
-                    quoted: quoted || undefined
-                }
-            )
-        }
-    }
-
-
-    // conn.sendText()
-    if (!conn.sendText) {
-        conn.sendText = async function (
-            jid,
-            text,
-            quoted,
-            options = {}
-        ) {
-
-            if (!jid) {
-                console.error('❌ conn.sendText: jid undefined')
-                return
-            }
-
-            return await conn.sendMessage(
-                jid,
-                {
-                    text: String(text ?? ''),
-                    ...options
-                },
-                {
-                    quoted: quoted || undefined
-                }
-            )
-        }
-    }
-
-
-    // conn.react()
-    if (!conn.react) {
-        conn.react = async function (
-            jid,
-            key,
-            emoji
-        ) {
-
-            if (!jid || !key) return
-
-            return await conn.sendMessage(
-                jid,
-                {
-                    react: {
-                        text: emoji,
-                        key
-                    }
-                }
-            )
-        }
-    }
-
-
-    // conn.getName()
-    if (!conn.getName) {
-        conn.getName = async function (jid) {
-
-            if (!jid) return ''
-
-            try {
-
-                if (
-                    jid.endsWith('@s.whatsapp.net') ||
-                    jid.endsWith('@lid')
-                ) {
-                    return jid.split('@')[0]
-                }
-
-                return jid.split('@')[0]
-
-            } catch {
-                return jid
-            }
-        }
-    }
-
-
-    return conn
-}
-
-
-/* =========================================================
-   DETECTAR COMANDO DEL PLUGIN
-   ========================================================= */
-
 function getCommandMatch(plugin, command) {
+    if (!plugin?.command) return false
 
-    if (!plugin?.command) {
-        return false
-    }
-
-
-    // RegExp
     if (plugin.command instanceof RegExp) {
-
         plugin.command.lastIndex = 0
-
-        const result =
-            plugin.command.test(command)
-
+        const result = plugin.command.test(command)
         plugin.command.lastIndex = 0
-
         return result
     }
 
-
-    // Array
     if (Array.isArray(plugin.command)) {
-
         return plugin.command.some(cmd => {
+            if (cmd instanceof RegExp) {
+                cmd.lastIndex = 0
+                const result = cmd.test(command)
+                cmd.lastIndex = 0
+                return result
+            }
 
-            return String(cmd)
-                .toLowerCase() ===
-                command.toLowerCase()
-
+            return String(cmd).toLowerCase() === command.toLowerCase()
         })
     }
 
-
-    // String
     if (typeof plugin.command === 'string') {
-
-        return plugin.command
-            .toLowerCase() ===
-            command.toLowerCase()
+        return plugin.command.toLowerCase() === command.toLowerCase()
     }
-
 
     return false
 }
 
-
-/* =========================================================
-   CARGAR PLUGINS
-   ========================================================= */
-
-async function loadPlugins() {
-
-    if (!fs.existsSync(pluginsPath)) {
-
-        console.log(
-            '❌ No existe la carpeta plugins:',
-            pluginsPath
-        )
-
+async function loadPlugins(dir = pluginFolder) {
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true })
         return
     }
 
+    const entries = fs.readdirSync(dir, {
+        withFileTypes: true
+    })
 
-    const files = fs.readdirSync(pluginsPath)
-        .filter(file =>
-            file.endsWith('.js')
-        )
+    for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name)
 
+        // Entrar automáticamente en las subcarpetas
+        if (entry.isDirectory()) {
+            await loadPlugins(fullPath)
+            continue
+        }
 
-    for (const file of files) {
+        // Solo cargar archivos .js
+        if (!entry.name.endsWith('.js')) continue
+
+        const relativePath = path
+            .relative(pluginFolder, fullPath)
+            .replace(/\\/g, '/')
 
         try {
+            const url = pathToFileURL(fullPath).href
 
-            const filePath =
-                path.join(
-                    pluginsPath,
-                    file
-                )
+            const module = await import(
+                `${url}?update=${Date.now()}`
+            )
 
+            const plugin = module.default || module
 
-            const url =
-                pathToFileURL(filePath).href
-
-
-            const module =
-                await import(
-                    `${url}?update=${Date.now()}`
-                )
-
-
-            if (module.default) {
-
-                global.plugins[file] =
-                    module.default
-
+            if (!plugin) {
                 console.log(
-                    `✅ Plugin cargado: ${file}`
+                    `⚠️ Plugin vacío: ${relativePath}`
                 )
-
-            } else {
-
-                console.log(
-                    `⚠️ Plugin sin export default: ${file}`
-                )
+                continue
             }
 
-        } catch (error) {
+            global.plugins[relativePath] = plugin
 
+            console.log(
+                `✅ Plugin cargado: ${relativePath}`
+            )
+
+        } catch (error) {
             console.error(
-                `❌ Error cargando ${file}:`,
+                `❌ Error cargando ${relativePath}:`,
                 error
             )
         }
     }
 }
 
-
 await loadPlugins()
 
-
-/* =========================================================
-   HANDLER PRINCIPAL
-   ========================================================= */
-
-export default async function handler(
-    conn,
-    update
-) {
-
+export default async function handler(conn, m) {
     try {
+        if (!m) return
 
-        if (!update?.messages?.length) {
-            return
-        }
+        const messages = m.messages || [m]
 
-
-        /*
-         * Añadir compatibilidad al conn
-         */
-
-        conn = createCompatConn(conn)
-
-
-        /* =====================================================
-           PROCESAR MENSAJES
-           ===================================================== */
-
-        for (const m of update.messages) {
-
+        for (const msg of messages) {
             try {
-
-                if (!m?.message) {
-                    continue
-                }
-
-
-                /* =================================================
-                   COMPATIBILIDAD DEL MENSAJE
-                   ================================================= */
-
-                /*
-                 * Los plugins antiguos esperan:
-                 *
-                 * m.chat
-                 * m.sender
-                 * m.fromMe
-                 * m.isGroup
-                 */
-
-                m.chat =
-                    m.key?.remoteJid ||
-                    ''
-
-
-                m.sender =
-                    m.key?.participant ||
-                    m.key?.remoteJid ||
-                    ''
-
-
-                m.fromMe =
-                    !!m.key?.fromMe
-
-
-                m.isGroup =
-                    typeof m.chat === 'string' &&
-                    m.chat.endsWith('@g.us')
-
-
-                /*
-                 * Si no tenemos chat no podemos responder
-                 */
-
-                if (!m.chat) {
-                    continue
-                }
-
-
-                /* =================================================
-                   IGNORAR ESTADOS
-                   ================================================= */
+                if (!msg?.message) continue
 
                 if (
-                    m.chat ===
-                    'status@broadcast'
+                    msg.key?.remoteJid === 'status@broadcast'
                 ) {
                     continue
                 }
 
-
-                /* =================================================
-                   OBTENER TEXTO
-                   ================================================= */
-
-                const message =
-                    m.message.conversation ||
-                    m.message.extendedTextMessage?.text ||
-                    m.message.imageMessage?.caption ||
-                    m.message.videoMessage?.caption ||
-                    m.message.documentMessage?.caption ||
-                    m.message.buttonsResponseMessage?.selectedButtonId ||
-                    m.message.listResponseMessage?.singleSelectReply?.selectedRowId ||
-                    m.message.templateButtonReplyMessage?.selectedId ||
+                const text =
+                    msg.text ||
+                    msg.body ||
+                    msg.message?.conversation ||
+                    msg.message?.extendedTextMessage?.text ||
+                    msg.message?.imageMessage?.caption ||
+                    msg.message?.videoMessage?.caption ||
+                    msg.message?.documentMessage?.caption ||
                     ''
 
+                if (!text) continue
 
-                if (!message) {
-                    continue
-                }
+                const prefixMatch = text.match(/^[#!./]/)
 
+                if (!prefixMatch) continue
 
-                /* =================================================
-                   DETECTAR PREFIJO
-                   ================================================= */
+                const usedPrefix = prefixMatch[0]
 
-                const prefixMatch =
-                    message.match(
-                        /^[#!./]/
-                    )
+                const body = text
+                    .slice(usedPrefix.length)
+                    .trim()
 
+                if (!body) continue
 
-                if (!prefixMatch) {
-                    continue
-                }
+                const [command, ...args] = body.split(/\s+/)
 
+                const commandLower =
+                    command.toLowerCase()
 
-                const usedPrefix =
-                    prefixMatch[0]
-
-
-                /* =================================================
-                   QUITAR PREFIJO
-                   ================================================= */
-
-                const body =
-                    message
-                        .slice(
-                            usedPrefix.length
-                        )
-                        .trim()
-
-
-                if (!body) {
-                    continue
-                }
-
-
-                /* =================================================
-                   COMANDO Y TEXTO
-                   ================================================= */
-
-                const parts =
-                    body.split(/\s+/)
-
-
-                const command =
-                    parts
-                        .shift()
-                        .toLowerCase()
-
-
-                const text =
-                    parts.join(' ')
-
+                const argsText = args.join(' ')
 
                 console.log(
-                    `[CMD] ${usedPrefix}${command}`,
-                    text
-                        ? `| ${text}`
-                        : ''
+                    `[CMD] ${usedPrefix}${commandLower}`,
+                    argsText ? `| ${argsText}` : ''
                 )
-
-
-                /* =================================================
-                   BUSCAR PLUGIN
-                   ================================================= */
 
                 for (
                     const [filename, plugin]
-                    of Object.entries(
-                        global.plugins
-                    )
+                    of Object.entries(global.plugins)
                 ) {
-
-                    if (!plugin) {
-                        continue
-                    }
-
+                    if (!plugin) continue
+                    if (plugin.disabled) continue
 
                     const matched =
                         getCommandMatch(
                             plugin,
-                            command
+                            commandLower
                         )
 
-
-                    if (!matched) {
-                        continue
-                    }
-
+                    if (!matched) continue
 
                     console.log(
                         `🔧 Ejecutando plugin: ${filename}`
                     )
 
-
-                    /* =================================================
-                       QUOTED
-                       ================================================= */
-
-                    const quotedMessage =
-                        m.message
-                            ?.extendedTextMessage
-                            ?.contextInfo
-                            ?.quotedMessage
-
-
-                    let quoted = null
-
-
-                    if (quotedMessage) {
-
-                        quoted = {
-
-                            message:
-                                quotedMessage
-                        }
-                    }
-
-
-                    /* =================================================
-                       CONTEXTO PARA PLUGINS
-                       ================================================= */
-
                     const ctx = {
-
-                        /*
-                         * Conexión Baileys
-                         */
                         conn,
-
-
-                        /*
-                         * Prefijo utilizado
-                         */
                         usedPrefix,
+                        command: commandLower,
+                        text: argsText,
+                        args,
 
-
-                        /*
-                         * Comando
-                         */
-                        command,
-
-
-                        /*
-                         * Texto después del comando
-                         */
-                        text,
-
-
-                        /*
-                         * Argumentos
-                         */
-                        args:
-                            text
-                                ? text.split(/\s+/)
-                                : [],
-
-
-                        /*
-                         * Grupo
-                         */
-                        participants: [],
-
-
-                        /*
-                         * Permisos
-                         */
                         isOwner: false,
-
                         isAdmin: false,
-
                         isBotAdmin: false,
 
+                        participants: [],
 
-                        /*
-                         * Mensaje citado
-                         */
-                        quoted
+                        quoted:
+                            msg.message
+                                ?.extendedTextMessage
+                                ?.contextInfo
+                                ?.quotedMessage
+                                ? {
+                                    message:
+                                        msg.message
+                                            .extendedTextMessage
+                                            .contextInfo
+                                            .quotedMessage
+                                }
+                                : null
                     }
 
-
-                    /* =================================================
-                       EJECUTAR PLUGIN
-                       ================================================= */
-
-                    await plugin.call(
-                        null,
-                        m,
-                        ctx
-                    )
-
-
-                    /*
-                     * Solo ejecutar el primer
-                     * plugin que coincida
-                     */
+                    try {
+                        await plugin.call(
+                            conn,
+                            msg,
+                            ctx
+                        )
+                    } catch (error) {
+                        console.error(
+                            `❌ Error ejecutando ${filename}:`,
+                            error
+                        )
+                    }
 
                     break
                 }
 
             } catch (error) {
-
                 console.error(
                     '❌ Error procesando mensaje:',
                     error
@@ -564,10 +222,11 @@ export default async function handler(
         }
 
     } catch (error) {
-
         console.error(
             '❌ Error general del handler:',
             error
         )
     }
 }
+
+export { loadPlugins }
