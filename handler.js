@@ -9,32 +9,106 @@ const pluginsPath = path.join(__dirname, 'plugins')
 
 global.plugins = global.plugins || {}
 
+
+/* =========================================================
+   COMPATIBILIDAD CON PLUGINS ANTIGUOS
+   ========================================================= */
+
+function createCompatConn(conn) {
+
+    if (!conn.reply) {
+        conn.reply = async function (jid, text, quoted, options = {}) {
+            return await conn.sendMessage(
+                jid,
+                {
+                    text: String(text ?? ''),
+                    ...options
+                },
+                {
+                    quoted: quoted || undefined
+                }
+            )
+        }
+    }
+
+    if (!conn.sendText) {
+        conn.sendText = async function (jid, text, quoted, options = {}) {
+            return await conn.sendMessage(
+                jid,
+                {
+                    text: String(text ?? ''),
+                    ...options
+                },
+                {
+                    quoted: quoted || undefined
+                }
+            )
+        }
+    }
+
+    if (!conn.react) {
+        conn.react = async function (jid, key, emoji) {
+            return await conn.sendMessage(jid, {
+                react: {
+                    text: emoji,
+                    key
+                }
+            })
+        }
+    }
+
+    return conn
+}
+
+
+/* =========================================================
+   MATCH DE COMANDOS
+   ========================================================= */
+
 function getCommandMatch(plugin, command) {
+
     if (!plugin?.command) return false
 
     if (plugin.command instanceof RegExp) {
+
         plugin.command.lastIndex = 0
+
         const result = plugin.command.test(command)
+
         plugin.command.lastIndex = 0
+
         return result
     }
 
     if (Array.isArray(plugin.command)) {
+
         return plugin.command.some(cmd =>
             String(cmd).toLowerCase() === command.toLowerCase()
         )
     }
 
     if (typeof plugin.command === 'string') {
+
         return plugin.command.toLowerCase() === command.toLowerCase()
     }
 
     return false
 }
 
+
+/* =========================================================
+   CARGAR PLUGINS
+   ========================================================= */
+
 async function loadPlugins() {
+
     if (!fs.existsSync(pluginsPath)) {
-        console.log('❌ No existe la carpeta plugins:', pluginsPath)
+
+        console.log(
+            '❌ No existe la carpeta plugins:',
+            pluginsPath
+        )
+
         return
     }
 
@@ -42,8 +116,14 @@ async function loadPlugins() {
         .filter(file => file.endsWith('.js'))
 
     for (const file of files) {
+
         try {
-            const filePath = path.join(pluginsPath, file)
+
+            const filePath = path.join(
+                pluginsPath,
+                file
+            )
+
             const url = pathToFileURL(filePath).href
 
             const module = await import(
@@ -51,16 +131,22 @@ async function loadPlugins() {
             )
 
             if (module.default) {
+
                 global.plugins[file] = module.default
 
-                console.log(`✅ Plugin cargado: ${file}`)
+                console.log(
+                    `✅ Plugin cargado: ${file}`
+                )
+
             } else {
+
                 console.log(
                     `⚠️ Plugin sin export default: ${file}`
                 )
             }
 
         } catch (error) {
+
             console.error(
                 `❌ Error cargando ${file}:`,
                 error
@@ -71,11 +157,30 @@ async function loadPlugins() {
 
 await loadPlugins()
 
+
+/* =========================================================
+   HANDLER PRINCIPAL
+   ========================================================= */
+
 export default async function handler(conn, update) {
 
     try {
 
         if (!update?.messages?.length) return
+
+
+        /*
+         * Añadimos compatibilidad al conn original.
+         *
+         * Así los plugins pueden seguir utilizando:
+         *
+         * conn.reply()
+         * conn.sendText()
+         * conn.sendMessage()
+         */
+
+        conn = createCompatConn(conn)
+
 
         for (const m of update.messages) {
 
@@ -83,10 +188,19 @@ export default async function handler(conn, update) {
 
                 if (!m?.message) continue
 
+
+                /* Ignorar estados */
+
                 if (
-                    m.key?.remoteJid ===
-                    'status@broadcast'
-                ) continue
+                    m.key?.remoteJid === 'status@broadcast'
+                ) {
+                    continue
+                }
+
+
+                /* =================================================
+                   OBTENER TEXTO DEL MENSAJE
+                   ================================================= */
 
                 const message =
                     m.message.conversation ||
@@ -96,7 +210,13 @@ export default async function handler(conn, update) {
                     m.message.documentMessage?.caption ||
                     ''
 
+
                 if (!message) continue
+
+
+                /* =================================================
+                   PREFIJO
+                   ================================================= */
 
                 const prefixMatch =
                     message.match(/^[#!./]/)
@@ -106,12 +226,22 @@ export default async function handler(conn, update) {
                 const usedPrefix =
                     prefixMatch[0]
 
+
+                /* =================================================
+                   BODY
+                   ================================================= */
+
                 const body =
                     message
                         .slice(usedPrefix.length)
                         .trim()
 
                 if (!body) continue
+
+
+                /* =================================================
+                   COMANDO + ARGUMENTOS
+                   ================================================= */
 
                 const parts =
                     body.split(/\s+/)
@@ -124,10 +254,18 @@ export default async function handler(conn, update) {
                 const text =
                     parts.join(' ')
 
+
                 console.log(
                     `[CMD] ${usedPrefix}${command}`,
-                    text ? `| ${text}` : ''
+                    text
+                        ? `| ${text}`
+                        : ''
                 )
+
+
+                /* =================================================
+                   BUSCAR PLUGIN
+                   ================================================= */
 
                 for (
                     const [filename, plugin]
@@ -136,25 +274,44 @@ export default async function handler(conn, update) {
 
                     if (!plugin) continue
 
+
                     const matched =
                         getCommandMatch(
                             plugin,
                             command
                         )
 
+
                     if (!matched) continue
+
 
                     console.log(
                         `🔧 Ejecutando plugin: ${filename}`
                     )
 
-                    const contextInfo =
+
+                    /* =================================================
+                       QUOTED
+                       ================================================= */
+
+                    const quotedMessage =
                         m.message
                             ?.extendedTextMessage
                             ?.contextInfo
+                            ?.quotedMessage
 
-                    const quotedMessage =
-                        contextInfo?.quotedMessage
+
+                    const quoted =
+                        quotedMessage
+                            ? {
+                                message: quotedMessage
+                            }
+                            : null
+
+
+                    /* =================================================
+                       CONTEXTO DEL PLUGIN
+                       ================================================= */
 
                     const ctx = {
 
@@ -166,9 +323,10 @@ export default async function handler(conn, update) {
 
                         text,
 
-                        args: text
-                            ? text.split(/\s+/)
-                            : [],
+                        args:
+                            text
+                                ? text.split(/\s+/)
+                                : [],
 
                         participants: [],
 
@@ -178,62 +336,21 @@ export default async function handler(conn, update) {
 
                         isBotAdmin: false,
 
-                        quoted: quotedMessage
-                            ? {
-                                message:
-                                    quotedMessage
-                            }
-                            : null
-                    }
-
-                    /*
-                     * FORMATO NUEVO
-                     *
-                     * export default {
-                     *     command: ['ping'],
-                     *     handler: async (m, { conn }) => {}
-                     * }
-                     */
-
-                    if (
-                        typeof plugin.handler ===
-                        'function'
-                    ) {
-
-                        await plugin.handler(
-                            m,
-                            ctx
-                        )
+                        quoted
 
                     }
 
-                    /*
-                     * COMPATIBILIDAD
-                     *
-                     * Por si algún plugin
-                     * exporta directamente
-                     * una función.
-                     */
 
-                    else if (
-                        typeof plugin ===
-                        'function'
-                    ) {
+                    /* =================================================
+                       EJECUTAR PLUGIN
+                       ================================================= */
 
-                        await plugin(
-                            m,
-                            ctx
-                        )
+                    await plugin.call(
+                        null,
+                        m,
+                        ctx
+                    )
 
-                    }
-
-                    else {
-
-                        console.log(
-                            `⚠️ ${filename} no tiene handler válido`
-                        )
-
-                    }
 
                     break
                 }
@@ -244,7 +361,6 @@ export default async function handler(conn, update) {
                     '❌ Error procesando mensaje:',
                     error
                 )
-
             }
         }
 
@@ -254,6 +370,5 @@ export default async function handler(conn, update) {
             '❌ Error general del handler:',
             error
         )
-
     }
 }
