@@ -1,210 +1,549 @@
-import moment from "moment-timezone"
-import fs from "fs"
-import { dirname, join } from "path"
-import { fileURLToPath } from "url"
-import fetch from "node-fetch"
+import { prepareWAMessageMedia } from '@whiskeysockets/baileys'
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(__filename)
+const toBold = (str = '') => {
+    const map = {
+        A:'𝘼',B:'𝘽',C:'𝘾',D:'𝘿',E:'𝙀',F:'𝙁',G:'𝙂',H:'𝙃',
+        I:'𝙄',J:'𝙅',K:'𝙆',L:'𝙇',M:'𝙈',N:'𝙉',O:'𝙊',P:'𝙋',
+        Q:'𝙌',R:'𝙍',S:'𝙎',T:'𝙏',U:'𝙐',V:'𝙑',W:'𝙒',X:'𝙓',
+        Y:'𝙔',Z:'𝙕',
+        a:'𝙖',b:'𝙗',c:'𝙘',d:'𝙙',e:'𝙚',f:'𝙛',g:'𝙜',h:'𝙝',
+        i:'𝙞',j:'𝙟',k:'𝙠',l:'𝙡',m:'𝙢',n:'𝙣',o:'𝙤',p:'𝙥',
+        q:'𝙦',r:'𝙧',s:'𝙨',t:'𝙩',u:'𝙪',v:'𝙫',w:'𝙬',x:'𝙭',
+        y:'𝙮',z:'𝙯',
+        0:'𝟬',1:'𝟭',2:'𝟮',3:'𝟯',4:'𝟰',
+        5:'𝟱',6:'𝟲',7:'𝟳',8:'𝟴',9:'𝟵'
+    }
 
-const baileysMod = await import("@whiskeysockets/baileys")
-const prepareWAMessageMedia =
-  baileysMod.prepareWAMessageMedia ||
-  baileysMod.default?.prepareWAMessageMedia
-
-if (typeof prepareWAMessageMedia !== "function") {
-  throw new Error("Tu versión de Baileys no expone prepareWAMessageMedia")
+    return String(str)
+        .split('')
+        .map(c => map[c] || c)
+        .join('')
 }
 
-function clockString(ms) {
-  let h = isNaN(ms) ? "--" : Math.floor(ms / 3600000)
-  let m = isNaN(ms) ? "--" : Math.floor(ms / 60000) % 60
-  let s = isNaN(ms) ? "--" : Math.floor(ms / 1000) % 60
-  return [h, m, s].map((v) => v.toString().padStart(2, "0")).join(":")
+/* =========================================================
+   CATEGORÍAS
+   ========================================================= */
+
+const sinonimosCategorias = {
+    grupo: 'Grupo',
+    group: 'Grupo',
+
+    descargas: 'Descargas',
+    download: 'Descargas',
+    downloader: 'Descargas',
+
+    herramientas: 'Herramientas',
+    tools: 'Herramientas',
+
+    diversión: 'Diversion',
+    diversion: 'Diversion',
+
+    economia: 'Economy',
+    economy: 'Economy',
+
+    ai: 'AI',
+
+    owner: 'Owner',
+    main: 'Main',
+    admin: 'Admin',
+
+    gacha: 'Gacha',
+    search: 'Search',
+
+    'sub-bot': 'Sub-Bot',
+    subbot: 'Sub-Bot',
+
+    utilidad: 'Utilidad',
+    varios: 'Varios'
 }
 
-async function getBufferFromUrl(url, timeoutMs = 8000) {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    const r = await fetch(url, { signal: controller.signal })
-    if (!r.ok) throw new Error(`No se pudo descargar: ${url}`)
-    const arrayBuffer = await r.arrayBuffer()
-    return Buffer.from(arrayBuffer)
-  } finally {
-    clearTimeout(timer)
-  }
-}
+const capitalize = str =>
+    str.charAt(0).toUpperCase() + str.slice(1)
 
-let handler = async (m, { conn, usedPrefix }) => {
-  try {
-    const userData = global.db?.data?.users?.[m.sender] || {}
-    const isRegistered = !!userData.registered
+function normalizarCategoria(cat) {
 
-    const tz = "America/Tegucigalpa"
-    const time = moment.tz(tz).format("HH:mm:ss")
-    const date = moment.tz(tz).format("DD/MM/YYYY")
-    const uptime = clockString(process.uptime() * 1000)
-
-    const tagUser = "@" + m.sender.split("@")[0]
-    const name = (await conn.getName(m.sender)) || "User"
-    const meName =
-      (await conn.getName(conn.user?.id || conn.user?.jid || "")) ||
-      global.botname ||
-      "Bot"
-
-    let profilePic
-    try {
-      profilePic = await conn.profilePictureUrl(m.sender, "image")
-    } catch {
-      profilePic = "https://i.ibb.co/3NfYh9k/default-avatar.png"
-    }
-    if (!profilePic) profilePic = "https://i.ibb.co/3NfYh9k/default-avatar.png"
-
-    let botNameToShow = global.botname || meName
-    let bannerUrl = "https://d.uguu.se/YfSdSusd.jpeg"
-
-    const channelUrl = "https://whatsapp.com/channel/0029VbArz9fAO7RGy2915k3O"
-    const botType = (conn.user?.jid || "") === (global.conn?.user?.jid || "") ? "Principal" : "Sub-Bot"
-
-    const senderBotNumber = (conn.user?.jid || "").split("@")[0]
-    let configPath
-    if ((conn.user?.jid || "") === (global.conn?.user?.jid || "")) configPath = join("./Sessions", "config.json")
-    else configPath = join("./Sessions/SubBot", senderBotNumber, "config.json")
-
-    if (configPath && fs.existsSync(configPath)) {
-      try {
-        const botConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"))
-        if (botConfig?.name) botNameToShow = botConfig.name
-        if (botConfig?.banner) bannerUrl = botConfig.banner
-      } catch {}
+    if (!cat) {
+        return 'Sin Categoria'
     }
 
-    const infoUser = [
-      "─┈➤ *`INFO USER`*",
-      `𔓕 *Nombre* : ${name}`,
-      `𔓕 *Tag* : ${tagUser}`,
-      `𔓕 *Registro* : ${isRegistered ? "✅" : "❌"}`
-    ].join("\n")
+    const normalizada =
+        String(cat)
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .trim()
 
-    const infoBot = [
-      "╭──┈ *`INFO BOT`*",
-      `│ 🐢 *Nombre* : ${botNameToShow}`,
-      `│ 🌲 *Tipo* : ${botType}`,
-      `│ 🌾 *Prefix* : ${usedPrefix}`,
-      `│ 🪴 *Uptime* : ${uptime}`,
-      `│ 🌵 *Hora* : ${time}`,
-      `│ 🌱 *Fecha* : ${date}`,
-      "╰------------------------------------------"
-    ].join("\n")
-
-    const menuText = [
-      `Hola *${tagUser}!*`,
-      `Bienvenido a *${botNameToShow}*`,
-      ``,
-      infoUser,
-      ``,
-      infoBot,
-      ``,
-      ` *\`CANAL\`*`,
-      `🌵 ${channelUrl}`
-    ].join("\n")
-
-    const thumbBuffer = await getBufferFromUrl(bannerUrl).catch(() => null)
-
-    let media = null
-    if (thumbBuffer) {
-      try {
-        media = await prepareWAMessageMedia(
-          { image: thumbBuffer },
-          { upload: conn.waUploadToServer }
-        )
-      } catch (e) {
-        console.error('Error preparando media del menú:', e)
-        media = null
-      }
-    }
-
-    const sections = [
-      {
-        title: "👑 OWNER",
-        highlight_label: "✨",
-        rows: [
-          { title: "Menú Owner", description: "Comandos exclusivos para creadores", id: `${usedPrefix}menuowner` }
-        ]
-      },
-      {
-        title: "📁 CATEGORIAS PRINCIPALES",
-        highlight_label: "🤖",
-        rows: [
-          { title: "Menú Grupos", description: "Comandos de administración de grupos", id: `${usedPrefix}menugrupos` },
-          { title: "Menú Descargas", description: "Descargar videos, música y fotos", id: `${usedPrefix}menudescargas` },
-          { title: "Menú Fun", description: "Comandos de entretenimiento y diversión", id: `${usedPrefix}menufun` },
-          { title: "Menú Gacha", description: "Comandos de juegos gacha y casino", id: `${usedPrefix}menugacha` },
-          { title: "Menú IA", description: "Interactuar con Inteligencias Artificiales", id: `${usedPrefix}menuia` },
-          { title: "Menú Herramientas", description: "Utilidades y herramientas útiles", id: `${usedPrefix}menuherramientas` },
-          { title: "Menú Anime", description: "Comandos e imágenes del mundo anime", id: `${usedPrefix}menuanime` }
-        ]
-      }
-    ]
-
-    const nativeFlowPayload = {
-      body: { text: `𝗠𝗘𝗡𝗨 • ${botNameToShow}` },
-      footer: { text: menuText },
-      header: media ? {
-        title: `🐢 ${botNameToShow}`,
-        subtitle: `👤 ${name} • ⏱ ${uptime}`,
-        hasMediaAttachment: true,
-        imageMessage: media.imageMessage
-      } : undefined,
-      nativeFlowMessage: {
-        buttons: [
-          {
-            name: "single_select",
-            buttonParamsJson: JSON.stringify({
-              title: "📜 Menus disponibles",
-              sections
-            })
-          },
-          {
-            name: "quick_reply",
-            buttonParamsJson: JSON.stringify({ display_text: "🚀 Ping", id: `${usedPrefix}ping` })
-          },
-          {
-            name: "quick_reply",
-            buttonParamsJson: JSON.stringify({ display_text: "📝 Registrarse", id: `${usedPrefix}reg` })
-          },
-          {
-            name: "cta_url",
-            buttonParamsJson: JSON.stringify({ display_text: "🍁 Canal", url: channelUrl, merchant_url: channelUrl })
-          },
-          {
-            name: "quick_reply",
-            buttonParamsJson: JSON.stringify({ display_text: "📜 Menu Completo", id: `${usedPrefix}allmenu` })
-          }
-        ],
-        messageParamsJson: JSON.stringify({
-          bottom_sheet: {
-            list_title: "🐢 Sub-Menús Disponibles",
-            button_title: "🍄 Menu List",
-            in_thread_buttons_limit: 2,
-            divider_indices: [1, 2, 3, 999]
-          }
-        })
-      },
-      contextInfo: { mentionedJid: [m.sender], forwardingScore: 777, isForwarded: true }
-    }
-
-    await conn.relayMessage(
-      m.chat,
-      { viewOnceMessage: { message: { interactiveMessage: nativeFlowPayload } } },
-      { quoted: m }
+    return (
+        sinonimosCategorias[normalizada] ||
+        capitalize(normalizada)
     )
-  } catch (e) {
-    console.error(e)
-    await m.reply(`Error: ${e?.message || e}`)
-  }
 }
 
-handler.command = ["help", "menu", "m"]
+/* =========================================================
+   OBTENER NOMBRE DEL PLUGIN
+   ========================================================= */
+
+function getPluginName(plugin) {
+
+    if (plugin?.name) {
+        return plugin.name
+    }
+
+    return null
+}
+
+/* =========================================================
+   OBTENER COMANDOS
+   ========================================================= */
+
+function getPluginCommands(plugin) {
+
+    if (!plugin) {
+        return []
+    }
+
+    let commands = []
+
+    if (Array.isArray(plugin.command)) {
+        commands.push(...plugin.command)
+    } else if (typeof plugin.command === 'string') {
+        commands.push(plugin.command)
+    }
+
+    /*
+     * También soporta plugins que tengan help
+     */
+
+    if (
+        Array.isArray(plugin.help)
+    ) {
+        commands.push(...plugin.help)
+    }
+
+    return [
+        ...new Set(
+            commands
+                .filter(Boolean)
+                .map(String)
+        )
+    ]
+}
+
+/* =========================================================
+   GENERAR LISTA
+   ========================================================= */
+
+function generarListaComandos(
+    plugins,
+    prefix
+) {
+
+    if (!plugins) {
+        return ''
+    }
+
+    const categorias = {}
+    const comandosVistos = new Set()
+
+    for (
+        const [pluginPath, plugin]
+        of Object.entries(plugins)
+    ) {
+
+        if (!plugin) {
+            continue
+        }
+
+        const comandos =
+            getPluginCommands(plugin)
+
+        if (!comandos.length) {
+            continue
+        }
+
+        /*
+         * Tomoe utiliza tags.
+         * También aceptamos category por compatibilidad.
+         */
+
+        let tags = []
+
+        if (Array.isArray(plugin.tags)) {
+            tags = plugin.tags
+        } else if (typeof plugin.tags === 'string') {
+            tags = [plugin.tags]
+        } else if (plugin.category) {
+            tags = [plugin.category]
+        } else {
+            tags = ['Sin Categoria']
+        }
+
+        for (const tag of tags) {
+
+            const categoria =
+                normalizarCategoria(tag)
+
+            if (!categorias[categoria]) {
+                categorias[categoria] = []
+            }
+
+            for (const comando of comandos) {
+
+                const key =
+                    `${categoria}:${comando}`
+
+                if (comandosVistos.has(key)) {
+                    continue
+                }
+
+                comandosVistos.add(key)
+
+                categorias[categoria].push({
+                    comando,
+                    plugin,
+                    pluginPath
+                })
+            }
+        }
+    }
+
+    let lista = ''
+
+    const categoriasOrdenadas =
+        Object.keys(categorias).sort()
+
+    for (
+        const categoria
+        of categoriasOrdenadas
+    ) {
+
+        const comandos =
+            categorias[categoria]
+
+        comandos.sort((a, b) =>
+            a.comando.localeCompare(
+                b.comando
+            )
+        )
+
+        lista +=
+            `\n╭━━〔 ${categoria.toUpperCase()} 〕━━╮\n`
+
+        lista +=
+            `┃ 📚 Comandos\n`
+
+        for (const item of comandos) {
+
+            lista +=
+                `┃ ✦ *${prefix}${item.comando}*\n`
+        }
+
+        lista +=
+            `╰━━━━━━━━━━━━━━╯\n\n`
+    }
+
+    return lista
+}
+
+/* =========================================================
+   MENU TOMOE
+   ========================================================= */
+
+let handler = async (
+    m,
+    {
+        conn,
+        usedPrefix
+    }
+) => {
+
+    try {
+
+        const sender =
+            m.key?.participant ||
+            m.key?.remoteJid ||
+            m.sender
+
+        const phone =
+            String(sender)
+                .split('@')[0]
+
+        const plugins =
+            global.plugins || {}
+
+        /*
+         * Configuración de Tomoe
+         */
+
+        const botNombre =
+            global.botname ||
+            global.nombre ||
+            global.botName ||
+            'TOMOE'
+
+        const botTipo =
+            global.tipo ||
+            'PRINCIPAL'
+
+        const developer =
+            global.author ||
+            global.ownerName ||
+            phone
+
+        const prefix =
+            usedPrefix ||
+            global.prefix ||
+            '.'
+
+        const webLink =
+            global.web ||
+            'https://wa.me/'
+
+        const bannerUrl =
+            global.banner ||
+            ''
+
+        /*
+         * Generar comandos
+         */
+
+        const listaComandos =
+            generarListaComandos(
+                plugins,
+                prefix
+            )
+
+        /*
+         * Contar plugins
+         */
+
+        const totalPlugins =
+            Object.keys(plugins).length
+
+        /*
+         * Texto del menú
+         */
+
+        const menuText = `
+╭━━━〔 🌌 ${toBold(botNombre)} 〕━━━╮
+┃ 👋 Hola @${phone}
+┃
+┃ 🤖 Tipo: ${toBold(botTipo)}
+┃ 👑 Dev: ${developer}
+┃ 🌐 Web:
+┃ ${webLink}
+╰━━━━━━━━━━━━━━╯
+
+${listaComandos}
+
+╭━━〔 ⚡ INFO 〕━━╮
+┃ 📦 Plugins: ${totalPlugins}
+┃ 🔋 Sistema activo
+╰━━━━━━━━━━━━━━╯
+`
+
+        /*
+         * Evitamos metadata de canales
+         */
+
+        const contextInfo = {}
+
+        /* =================================================
+           VIDEO MP4
+           ================================================= */
+
+        if (
+            bannerUrl &&
+            bannerUrl
+                .toLowerCase()
+                .includes('.mp4')
+        ) {
+
+            await conn.sendMessage(
+                m.chat,
+                {
+                    video: {
+                        url: bannerUrl
+                    },
+
+                    caption: menuText,
+
+                    mentions: [sender],
+
+                    gifPlayback: true,
+
+                    mimetype:
+                        'video/mp4',
+
+                    contextInfo
+                },
+                {
+                    quoted: m
+                }
+            )
+
+            return
+        }
+
+        /* =================================================
+           IMAGEN
+           ================================================= */
+
+        if (bannerUrl) {
+
+            try {
+
+                const uploadMethod =
+                    conn.waUploadToServer ||
+                    conn.updateMediaMessage
+
+                const {
+                    imageMessage
+                } =
+                    await prepareWAMessageMedia(
+                        {
+                            image: {
+                                url: bannerUrl
+                            }
+                        },
+                        {
+                            upload:
+                                uploadMethod,
+
+                            mediaTypeOverride:
+                                'thumbnail-link'
+                        }
+                    )
+
+                const linkPreview = {
+                    'canonical-url':
+                        webLink,
+
+                    'matched-text':
+                        webLink,
+
+                    title:
+                        `${botNombre} - ${botTipo}`,
+
+                    description:
+                        `Bot de WhatsApp | Dev: ${developer}`,
+
+                    jpegThumbnail:
+                        imageMessage?.jpegThumbnail
+                            ? Buffer.from(
+                                imageMessage.jpegThumbnail
+                            )
+                            : undefined,
+
+                    highQualityThumbnail:
+                        imageMessage || undefined
+                }
+
+                await conn.sendMessage(
+                    m.chat,
+                    {
+                        text: menuText,
+
+                        mentions: [
+                            sender
+                        ],
+
+                        linkPreview,
+
+                        contextInfo
+                    },
+                    {
+                        quoted: m
+                    }
+                )
+
+            } catch (error) {
+
+                console.error(
+                    'Error con banner en menu:',
+                    error
+                )
+
+                await conn.sendMessage(
+                    m.chat,
+                    {
+                        text: menuText,
+
+                        mentions: [
+                            sender
+                        ],
+
+                        contextInfo
+                    },
+                    {
+                        quoted: m
+                    }
+                )
+            }
+
+            return
+        }
+
+        /* =================================================
+           SIN BANNER
+           ================================================= */
+
+        await conn.sendMessage(
+            m.chat,
+            {
+                text: menuText,
+
+                mentions: [
+                    sender
+                ],
+
+                contextInfo
+            },
+            {
+                quoted: m
+            }
+        )
+
+    } catch (error) {
+
+        console.error(
+            '❌ Error en menu:',
+            error
+        )
+
+        await conn.sendMessage(
+            m.chat,
+            {
+                text:
+                    `❌ Error en el menú:\n${error?.message || error}`
+            },
+            {
+                quoted: m
+            }
+        )
+    }
+}
+
+/* =========================================================
+   METADATA TOMOE
+   ========================================================= */
+
+handler.help = [
+    'menu',
+    'help',
+    'menú',
+    'comandos'
+]
+
+handler.tags = [
+    'main'
+]
+
+handler.command = [
+    'menu',
+    'help',
+    'menú',
+    'comandos'
+]
+
 export default handler
