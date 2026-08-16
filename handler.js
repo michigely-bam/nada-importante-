@@ -11,120 +11,19 @@ global.plugins = global.plugins || {}
 global.pluginFiles = global.pluginFiles || new Map()
 
 /* =========================================================
-   COMPATIBILIDAD DE CONN
+   BUSCAR PLUGINS RECURSIVAMENTE
    ========================================================= */
 
-function createCompatConn(conn) {
+function getPluginFiles(dir, files = []) {
+    if (!fs.existsSync(dir)) return files
 
-    if (!conn.reply) {
-        conn.reply = async function (jid, text, quoted, options = {}) {
-
-            if (!jid) return
-
-            return await conn.sendMessage(
-                jid,
-                {
-                    text: String(text ?? ''),
-                    ...options
-                },
-                {
-                    quoted: quoted || undefined
-                }
-            )
-        }
-    }
-
-    if (!conn.sendText) {
-        conn.sendText = async function (
-            jid,
-            text,
-            quoted,
-            options = {}
-        ) {
-
-            if (!jid) return
-
-            return await conn.sendMessage(
-                jid,
-                {
-                    text: String(text ?? ''),
-                    ...options
-                },
-                {
-                    quoted: quoted || undefined
-                }
-            )
-        }
-    }
-
-    if (!conn.react) {
-        conn.react = async function (
-            jid,
-            key,
-            emoji
-        ) {
-
-            if (!jid || !key) return
-
-            return await conn.sendMessage(
-                jid,
-                {
-                    react: {
-                        text: emoji,
-                        key
-                    }
-                }
-            )
-        }
-    }
-
-    if (!conn.getName) {
-        conn.getName = async function (jid) {
-
-            if (!jid) return ''
-
-            try {
-                return jid.split('@')[0]
-            } catch {
-                return jid
-            }
-        }
-    }
-
-    return conn
-}
-
-/* =========================================================
-   BUSCAR ARCHIVOS RECURSIVAMENTE
-   ========================================================= */
-
-function getPluginFiles(dir, result = []) {
-
-    if (!fs.existsSync(dir)) {
-        return result
-    }
-
-    const entries = fs.readdirSync(
-        dir,
-        {
-            withFileTypes: true
-        }
-    )
-
-    for (const entry of entries) {
-
-        const fullPath = path.join(
-            dir,
-            entry.name
-        )
+    for (const entry of fs.readdirSync(dir, {
+        withFileTypes: true
+    })) {
+        const fullPath = path.join(dir, entry.name)
 
         if (entry.isDirectory()) {
-
-            getPluginFiles(
-                fullPath,
-                result
-            )
-
+            getPluginFiles(fullPath, files)
             continue
         }
 
@@ -133,42 +32,31 @@ function getPluginFiles(dir, result = []) {
             entry.name.endsWith('.js') &&
             !entry.name.startsWith('_')
         ) {
-            result.push(fullPath)
+            files.push(fullPath)
         }
     }
 
-    return result
+    return files
 }
 
 /* =========================================================
-   NOMBRE DEL PLUGIN
+   NOMBRE RELATIVO DEL PLUGIN
    ========================================================= */
 
 function getPluginName(filePath) {
-
     return path
-        .relative(
-            pluginsPath,
-            filePath
-        )
+        .relative(pluginsPath, filePath)
         .replace(/\\/g, '/')
 }
 
 /* =========================================================
-   DETECTAR COMANDO
+   BUSCAR COMANDO
    ========================================================= */
 
-function getCommandMatch(
-    plugin,
-    command
-) {
-
-    if (!plugin?.command) {
-        return false
-    }
+function getCommandMatch(plugin, command) {
+    if (!plugin?.command) return false
 
     if (plugin.command instanceof RegExp) {
-
         plugin.command.lastIndex = 0
 
         const result =
@@ -180,20 +68,14 @@ function getCommandMatch(
     }
 
     if (Array.isArray(plugin.command)) {
-
-        return plugin.command.some(cmd => {
-
-            return String(cmd)
-                .toLowerCase() ===
-                command.toLowerCase()
-
-        })
+        return plugin.command.some(cmd =>
+            String(cmd).toLowerCase() ===
+            command.toLowerCase()
+        )
     }
 
     if (typeof plugin.command === 'string') {
-
-        return plugin.command
-            .toLowerCase() ===
+        return plugin.command.toLowerCase() ===
             command.toLowerCase()
     }
 
@@ -205,11 +87,8 @@ function getCommandMatch(
    ========================================================= */
 
 async function loadPlugin(filePath) {
-
     try {
-
-        const pluginName =
-            getPluginName(filePath)
+        const name = getPluginName(filePath)
 
         const url =
             pathToFileURL(filePath).href
@@ -220,42 +99,32 @@ async function loadPlugin(filePath) {
             )
 
         if (!module.default) {
-
             console.log(
-                `⚠️ Plugin sin export default: ${pluginName}`
+                `⚠️ Plugin sin export default: ${name}`
             )
-
-            return false
+            return
         }
+
+        global.plugins[name] =
+            module.default
 
         const stat =
             fs.statSync(filePath)
 
-        global.plugins[pluginName] =
-            module.default
-
-        global.pluginFiles.set(
-            pluginName,
-            {
-                path: filePath,
-                mtime: stat.mtimeMs
-            }
-        )
+        global.pluginFiles.set(name, {
+            path: filePath,
+            mtime: stat.mtimeMs
+        })
 
         console.log(
-            `✅ Plugin cargado: ${pluginName}`
+            `✅ Plugin cargado: ${name}`
         )
-
-        return true
 
     } catch (error) {
-
         console.error(
-            `❌ Error cargando plugin: ${filePath}`,
+            `❌ Error cargando plugin ${filePath}:`,
             error
         )
-
-        return false
     }
 }
 
@@ -263,15 +132,12 @@ async function loadPlugin(filePath) {
    CARGAR TODOS LOS PLUGINS
    ========================================================= */
 
-async function loadPlugins() {
+async function loadPlugins(force = false) {
 
     if (!fs.existsSync(pluginsPath)) {
-
         console.log(
-            '❌ No existe la carpeta plugins:',
-            pluginsPath
+            `❌ No existe la carpeta: ${pluginsPath}`
         )
-
         return
     }
 
@@ -280,72 +146,51 @@ async function loadPlugins() {
 
     const currentFiles =
         new Set(
-            files.map(file =>
-                getPluginName(file)
-            )
+            files.map(getPluginName)
         )
 
-    /* =====================================================
-       ELIMINAR PLUGINS QUE YA NO EXISTEN
-       ===================================================== */
+    /* Eliminar plugins borrados */
 
     for (
-        const pluginName
-        of Object.keys(global.plugins)
+        const name of Object.keys(global.plugins)
     ) {
+        if (!currentFiles.has(name)) {
 
-        if (!currentFiles.has(pluginName)) {
+            delete global.plugins[name]
 
-            delete global.plugins[pluginName]
-
-            global.pluginFiles.delete(
-                pluginName
-            )
+            global.pluginFiles.delete(name)
 
             console.log(
-                `🗑️ Plugin eliminado: ${pluginName}`
+                `🗑️ Plugin eliminado: ${name}`
             )
         }
     }
 
-    /* =====================================================
-       CARGAR / RECARGAR
-       ===================================================== */
+    /* Cargar / actualizar plugins */
 
     for (const filePath of files) {
 
-        const pluginName =
+        const name =
             getPluginName(filePath)
 
         try {
-
             const stat =
                 fs.statSync(filePath)
 
             const old =
-                global.pluginFiles.get(
-                    pluginName
-                )
-
-            /*
-             * Si no existe o cambió,
-             * se vuelve a cargar.
-             */
+                global.pluginFiles.get(name)
 
             if (
+                force ||
                 !old ||
                 old.mtime !== stat.mtimeMs
             ) {
-
-                await loadPlugin(
-                    filePath
-                )
+                await loadPlugin(filePath)
             }
 
         } catch (error) {
-
             console.error(
-                `❌ Error revisando ${pluginName}:`,
+                `❌ Error revisando ${name}:`,
                 error
             )
         }
@@ -356,46 +201,34 @@ async function loadPlugins() {
    RELOAD MANUAL
    ========================================================= */
 
-global.reloadPlugins = async function () {
+global.reloadPlugins = async () => {
 
     console.log(
         '🔄 Recargando plugins...'
     )
 
-    /*
-     * Forzamos la recarga eliminando
-     * los registros anteriores.
-     */
-
-    global.pluginFiles.clear()
-
-    await loadPlugins()
+    await loadPlugins(true)
 
     console.log(
-        `✅ Plugins cargados: ${
+        `✅ Plugins activos: ${
             Object.keys(global.plugins).length
         }`
     )
-
-    return true
 }
 
 /* =========================================================
    RESTART
    ========================================================= */
 
-global.restartBot = function () {
+global.restartBot = () => {
 
     console.log(
         '🔄 Reiniciando Tomoe...'
     )
 
     setTimeout(() => {
-
         process.exit(0)
-
     }, 500)
-
 }
 
 /* =========================================================
@@ -408,41 +241,23 @@ await loadPlugins()
    HOT RELOAD
    ========================================================= */
 
-let lastPluginScan = 0
+let lastScan = 0
 
-async function checkHotReload() {
+async function hotReload() {
 
     const now = Date.now()
 
-    /*
-     * Evita revisar el disco en cada mensaje.
-     * Se revisa como máximo cada 2 segundos.
-     */
-
-    if (
-        now - lastPluginScan <
-        2000
-    ) {
+    if (now - lastScan < 1500) {
         return
     }
 
-    lastPluginScan = now
+    lastScan = now
 
-    try {
-
-        await loadPlugins()
-
-    } catch (error) {
-
-        console.error(
-            '❌ Error en hot reload:',
-            error
-        )
-    }
+    await loadPlugins(false)
 }
 
 /* =========================================================
-   OBTENER TEXTO DEL MENSAJE
+   OBTENER TEXTO
    ========================================================= */
 
 function getMessageText(m) {
@@ -453,9 +268,13 @@ function getMessageText(m) {
         m?.message?.imageMessage?.caption ||
         m?.message?.videoMessage?.caption ||
         m?.message?.documentMessage?.caption ||
-        m?.message?.buttonsResponseMessage?.selectedButtonId ||
-        m?.message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
-        m?.message?.templateButtonReplyMessage?.selectedId ||
+        m?.message?.buttonsResponseMessage
+            ?.selectedButtonId ||
+        m?.message?.listResponseMessage
+            ?.singleSelectReply
+            ?.selectedRowId ||
+        m?.message?.templateButtonReplyMessage
+            ?.selectedId ||
         ''
     )
 }
@@ -464,7 +283,7 @@ function getMessageText(m) {
    CREAR CONTEXTO
    ========================================================= */
 
-function createPluginContext(
+function createContext(
     conn,
     m,
     usedPrefix,
@@ -479,47 +298,38 @@ function createPluginContext(
             : []
 
     return {
-
         conn,
-
         sock: conn,
 
         msg: m,
-
         m,
 
         usedPrefix,
-
         prefix: usedPrefix,
 
         command,
 
         text,
-
         body: text,
-
         args,
+
+        quoted,
+
+        chat: m.chat,
+        sender: m.sender,
+
+        pushName:
+            m.pushName ||
+            '',
+
+        isGroup:
+            m.isGroup || false,
 
         participants: [],
 
         isOwner: false,
-
         isAdmin: false,
-
-        isBotAdmin: false,
-
-        quoted,
-
-        pushName:
-            m.pushName ||
-            m.pushName ||
-            '',
-
-        chat: m.chat,
-
-        sender: m.sender,
-
-        isGroup: m.isGroup
+        isBotAdmin: false
     }
 }
 
@@ -534,15 +344,12 @@ async function executePlugin(
 ) {
 
     /*
-     * FORMATO ANTIGUO DE TOMOE
+     * FORMATO 1
      *
      * export default async function (m, ctx) {}
      */
 
-    if (
-        typeof plugin ===
-        'function'
-    ) {
+    if (typeof plugin === 'function') {
 
         return await plugin(
             m,
@@ -551,18 +358,18 @@ async function executePlugin(
     }
 
     /*
-     * FORMATO NUEVO
+     * FORMATO 2
      *
      * export default {
-     *   command: ['ping'],
-     *   async execute(m, ctx) {}
+     *     command: ['ping'],
+     *
+     *     async execute(m, ctx) {}
      * }
      */
 
     if (
         plugin &&
-        typeof plugin.execute ===
-        'function'
+        typeof plugin.execute === 'function'
     ) {
 
         return await plugin.execute(
@@ -572,15 +379,14 @@ async function executePlugin(
     }
 
     /*
-     * Compatibilidad adicional
-     * con plugins que utilizan
-     * handler().
+     * FORMATO 3
+     *
+     * handler()
      */
 
     if (
         plugin &&
-        typeof plugin.handler ===
-        'function'
+        typeof plugin.handler === 'function'
     ) {
 
         return await plugin.handler(
@@ -590,12 +396,12 @@ async function executePlugin(
     }
 
     throw new Error(
-        'El plugin no tiene una función ejecutable'
+        'El plugin no tiene execute(), handler() ni es una función'
     )
 }
 
 /* =========================================================
-   HANDLER PRINCIPAL
+   HANDLER
    ========================================================= */
 
 export default async function handler(
@@ -605,24 +411,11 @@ export default async function handler(
 
     try {
 
-        if (
-            !update?.messages?.length
-        ) {
+        if (!update?.messages?.length) {
             return
         }
 
-        conn =
-            createCompatConn(conn)
-
-        /*
-         * Hot reload
-         */
-
-        await checkHotReload()
-
-        /* =================================================
-           PROCESAR MENSAJES
-           ================================================= */
+        await hotReload()
 
         for (
             const m
@@ -635,13 +428,12 @@ export default async function handler(
                     continue
                 }
 
-                /* =========================================
-                   DATOS BÁSICOS
-                   ========================================= */
+                /* ==============================
+                   DATOS DEL MENSAJE
+                   ============================== */
 
                 m.chat =
-                    m.key?.remoteJid ||
-                    ''
+                    m.key?.remoteJid || ''
 
                 m.sender =
                     m.key?.participant ||
@@ -652,19 +444,15 @@ export default async function handler(
                     !!m.key?.fromMe
 
                 m.isGroup =
-                    typeof m.chat ===
-                    'string' &&
-                    m.chat.endsWith(
-                        '@g.us'
-                    )
+                    m.chat.endsWith('@g.us')
 
                 if (!m.chat) {
                     continue
                 }
 
-                /* =========================================
-                   IGNORAR ESTADOS
-                   ========================================= */
+                /* ==============================
+                   STATUS
+                   ============================== */
 
                 if (
                     m.chat ===
@@ -673,9 +461,9 @@ export default async function handler(
                     continue
                 }
 
-                /* =========================================
+                /* ==============================
                    TEXTO
-                   ========================================= */
+                   ============================== */
 
                 const message =
                     getMessageText(m)
@@ -684,14 +472,12 @@ export default async function handler(
                     continue
                 }
 
-                /* =========================================
+                /* ==============================
                    PREFIJO
-                   ========================================= */
+                   ============================== */
 
                 const prefixMatch =
-                    message.match(
-                        /^[#!./]/
-                    )
+                    message.match(/^[#!./]/)
 
                 if (!prefixMatch) {
                     continue
@@ -700,9 +486,9 @@ export default async function handler(
                 const usedPrefix =
                     prefixMatch[0]
 
-                /* =========================================
-                   CUERPO
-                   ========================================= */
+                /* ==============================
+                   BODY
+                   ============================== */
 
                 const body =
                     message
@@ -715,9 +501,9 @@ export default async function handler(
                     continue
                 }
 
-                /* =========================================
-                   COMANDO
-                   ========================================= */
+                /* ==============================
+                   COMMAND
+                   ============================== */
 
                 const parts =
                     body.split(/\s+/)
@@ -737,9 +523,11 @@ export default async function handler(
                         : ''
                 )
 
-                /* =========================================
+                /* ==============================
                    BUSCAR PLUGIN
-                   ========================================= */
+                   ============================== */
+
+                let found = false
 
                 for (
                     const [
@@ -755,23 +543,24 @@ export default async function handler(
                         continue
                     }
 
-                    const matched =
-                        getCommandMatch(
+                    if (
+                        !getCommandMatch(
                             plugin,
                             command
                         )
-
-                    if (!matched) {
+                    ) {
                         continue
                     }
+
+                    found = true
 
                     console.log(
                         `🔧 Ejecutando plugin: ${filename}`
                     )
 
-                    /* =====================================
+                    /* ==========================
                        QUOTED
-                       ===================================== */
+                       ========================== */
 
                     const quotedMessage =
                         m.message
@@ -779,24 +568,20 @@ export default async function handler(
                             ?.contextInfo
                             ?.quotedMessage
 
-                    let quoted = null
-
-                    if (
+                    const quoted =
                         quotedMessage
-                    ) {
+                            ? {
+                                message:
+                                    quotedMessage
+                            }
+                            : null
 
-                        quoted = {
-                            message:
-                                quotedMessage
-                        }
-                    }
-
-                    /* =====================================
+                    /* ==========================
                        CONTEXTO
-                       ===================================== */
+                       ========================== */
 
                     const ctx =
-                        createPluginContext(
+                        createContext(
                             conn,
                             m,
                             usedPrefix,
@@ -805,9 +590,9 @@ export default async function handler(
                             quoted
                         )
 
-                    /* =====================================
+                    /* ==========================
                        EJECUTAR
-                       ===================================== */
+                       ========================== */
 
                     try {
 
@@ -820,7 +605,7 @@ export default async function handler(
                     } catch (error) {
 
                         console.error(
-                            `❌ Error en plugin ${filename}:`,
+                            `❌ Error en ${filename}:`,
                             error
                         )
 
@@ -840,12 +625,13 @@ export default async function handler(
                         } catch {}
                     }
 
-                    /*
-                     * Solo ejecutamos el primer
-                     * plugin que coincida.
-                     */
-
                     break
+                }
+
+                if (!found) {
+                    console.log(
+                        `⚠️ Comando no encontrado: ${command}`
+                    )
                 }
 
             } catch (error) {
