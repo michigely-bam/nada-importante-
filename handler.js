@@ -11,13 +11,20 @@ global.plugins = global.plugins || {}
 
 
 /* =========================================================
-   COMPATIBILIDAD CON PLUGINS ANTIGUOS
+   COMPATIBILIDAD DE CONN
    ========================================================= */
 
 function createCompatConn(conn) {
 
+    // conn.reply()
     if (!conn.reply) {
         conn.reply = async function (jid, text, quoted, options = {}) {
+
+            if (!jid) {
+                console.error('❌ conn.reply: jid undefined')
+                return
+            }
+
             return await conn.sendMessage(
                 jid,
                 {
@@ -31,8 +38,21 @@ function createCompatConn(conn) {
         }
     }
 
+
+    // conn.sendText()
     if (!conn.sendText) {
-        conn.sendText = async function (jid, text, quoted, options = {}) {
+        conn.sendText = async function (
+            jid,
+            text,
+            quoted,
+            options = {}
+        ) {
+
+            if (!jid) {
+                console.error('❌ conn.sendText: jid undefined')
+                return
+            }
+
             return await conn.sendMessage(
                 jid,
                 {
@@ -46,51 +66,104 @@ function createCompatConn(conn) {
         }
     }
 
+
+    // conn.react()
     if (!conn.react) {
-        conn.react = async function (jid, key, emoji) {
-            return await conn.sendMessage(jid, {
-                react: {
-                    text: emoji,
-                    key
+        conn.react = async function (
+            jid,
+            key,
+            emoji
+        ) {
+
+            if (!jid || !key) return
+
+            return await conn.sendMessage(
+                jid,
+                {
+                    react: {
+                        text: emoji,
+                        key
+                    }
                 }
-            })
+            )
         }
     }
+
+
+    // conn.getName()
+    if (!conn.getName) {
+        conn.getName = async function (jid) {
+
+            if (!jid) return ''
+
+            try {
+
+                if (
+                    jid.endsWith('@s.whatsapp.net') ||
+                    jid.endsWith('@lid')
+                ) {
+                    return jid.split('@')[0]
+                }
+
+                return jid.split('@')[0]
+
+            } catch {
+                return jid
+            }
+        }
+    }
+
 
     return conn
 }
 
 
 /* =========================================================
-   MATCH DE COMANDOS
+   DETECTAR COMANDO DEL PLUGIN
    ========================================================= */
 
 function getCommandMatch(plugin, command) {
 
-    if (!plugin?.command) return false
+    if (!plugin?.command) {
+        return false
+    }
 
+
+    // RegExp
     if (plugin.command instanceof RegExp) {
 
         plugin.command.lastIndex = 0
 
-        const result = plugin.command.test(command)
+        const result =
+            plugin.command.test(command)
 
         plugin.command.lastIndex = 0
 
         return result
     }
 
+
+    // Array
     if (Array.isArray(plugin.command)) {
 
-        return plugin.command.some(cmd =>
-            String(cmd).toLowerCase() === command.toLowerCase()
-        )
+        return plugin.command.some(cmd => {
+
+            return String(cmd)
+                .toLowerCase() ===
+                command.toLowerCase()
+
+        })
     }
 
+
+    // String
     if (typeof plugin.command === 'string') {
 
-        return plugin.command.toLowerCase() === command.toLowerCase()
+        return plugin.command
+            .toLowerCase() ===
+            command.toLowerCase()
     }
+
 
     return false
 }
@@ -112,27 +185,38 @@ async function loadPlugins() {
         return
     }
 
+
     const files = fs.readdirSync(pluginsPath)
-        .filter(file => file.endsWith('.js'))
+        .filter(file =>
+            file.endsWith('.js')
+        )
+
 
     for (const file of files) {
 
         try {
 
-            const filePath = path.join(
-                pluginsPath,
-                file
-            )
+            const filePath =
+                path.join(
+                    pluginsPath,
+                    file
+                )
 
-            const url = pathToFileURL(filePath).href
 
-            const module = await import(
-                `${url}?update=${Date.now()}`
-            )
+            const url =
+                pathToFileURL(filePath).href
+
+
+            const module =
+                await import(
+                    `${url}?update=${Date.now()}`
+                )
+
 
             if (module.default) {
 
-                global.plugins[file] = module.default
+                global.plugins[file] =
+                    module.default
 
                 console.log(
                     `✅ Plugin cargado: ${file}`
@@ -155,6 +239,7 @@ async function loadPlugins() {
     }
 }
 
+
 await loadPlugins()
 
 
@@ -162,44 +247,94 @@ await loadPlugins()
    HANDLER PRINCIPAL
    ========================================================= */
 
-export default async function handler(conn, update) {
+export default async function handler(
+    conn,
+    update
+) {
 
     try {
 
-        if (!update?.messages?.length) return
+        if (!update?.messages?.length) {
+            return
+        }
 
 
         /*
-         * Añadimos compatibilidad al conn original.
-         *
-         * Así los plugins pueden seguir utilizando:
-         *
-         * conn.reply()
-         * conn.sendText()
-         * conn.sendMessage()
+         * Añadir compatibilidad al conn
          */
 
         conn = createCompatConn(conn)
 
 
+        /* =====================================================
+           PROCESAR MENSAJES
+           ===================================================== */
+
         for (const m of update.messages) {
 
             try {
 
-                if (!m?.message) continue
+                if (!m?.message) {
+                    continue
+                }
 
 
-                /* Ignorar estados */
+                /* =================================================
+                   COMPATIBILIDAD DEL MENSAJE
+                   ================================================= */
+
+                /*
+                 * Los plugins antiguos esperan:
+                 *
+                 * m.chat
+                 * m.sender
+                 * m.fromMe
+                 * m.isGroup
+                 */
+
+                m.chat =
+                    m.key?.remoteJid ||
+                    ''
+
+
+                m.sender =
+                    m.key?.participant ||
+                    m.key?.remoteJid ||
+                    ''
+
+
+                m.fromMe =
+                    !!m.key?.fromMe
+
+
+                m.isGroup =
+                    typeof m.chat === 'string' &&
+                    m.chat.endsWith('@g.us')
+
+
+                /*
+                 * Si no tenemos chat no podemos responder
+                 */
+
+                if (!m.chat) {
+                    continue
+                }
+
+
+                /* =================================================
+                   IGNORAR ESTADOS
+                   ================================================= */
 
                 if (
-                    m.key?.remoteJid === 'status@broadcast'
+                    m.chat ===
+                    'status@broadcast'
                 ) {
                     continue
                 }
 
 
                 /* =================================================
-                   OBTENER TEXTO DEL MENSAJE
+                   OBTENER TEXTO
                    ================================================= */
 
                 const message =
@@ -208,48 +343,66 @@ export default async function handler(conn, update) {
                     m.message.imageMessage?.caption ||
                     m.message.videoMessage?.caption ||
                     m.message.documentMessage?.caption ||
+                    m.message.buttonsResponseMessage?.selectedButtonId ||
+                    m.message.listResponseMessage?.singleSelectReply?.selectedRowId ||
+                    m.message.templateButtonReplyMessage?.selectedId ||
                     ''
 
 
-                if (!message) continue
+                if (!message) {
+                    continue
+                }
 
 
                 /* =================================================
-                   PREFIJO
+                   DETECTAR PREFIJO
                    ================================================= */
 
                 const prefixMatch =
-                    message.match(/^[#!./]/)
+                    message.match(
+                        /^[#!./]/
+                    )
 
-                if (!prefixMatch) continue
+
+                if (!prefixMatch) {
+                    continue
+                }
+
 
                 const usedPrefix =
                     prefixMatch[0]
 
 
                 /* =================================================
-                   BODY
+                   QUITAR PREFIJO
                    ================================================= */
 
                 const body =
                     message
-                        .slice(usedPrefix.length)
+                        .slice(
+                            usedPrefix.length
+                        )
                         .trim()
 
-                if (!body) continue
+
+                if (!body) {
+                    continue
+                }
 
 
                 /* =================================================
-                   COMANDO + ARGUMENTOS
+                   COMANDO Y TEXTO
                    ================================================= */
 
                 const parts =
                     body.split(/\s+/)
 
+
                 const command =
                     parts
                         .shift()
                         .toLowerCase()
+
 
                 const text =
                     parts.join(' ')
@@ -269,10 +422,14 @@ export default async function handler(conn, update) {
 
                 for (
                     const [filename, plugin]
-                    of Object.entries(global.plugins)
+                    of Object.entries(
+                        global.plugins
+                    )
                 ) {
 
-                    if (!plugin) continue
+                    if (!plugin) {
+                        continue
+                    }
 
 
                     const matched =
@@ -282,7 +439,9 @@ export default async function handler(conn, update) {
                         )
 
 
-                    if (!matched) continue
+                    if (!matched) {
+                        continue
+                    }
 
 
                     console.log(
@@ -301,43 +460,78 @@ export default async function handler(conn, update) {
                             ?.quotedMessage
 
 
-                    const quoted =
-                        quotedMessage
-                            ? {
-                                message: quotedMessage
-                            }
-                            : null
+                    let quoted = null
+
+
+                    if (quotedMessage) {
+
+                        quoted = {
+
+                            message:
+                                quotedMessage
+                        }
+                    }
 
 
                     /* =================================================
-                       CONTEXTO DEL PLUGIN
+                       CONTEXTO PARA PLUGINS
                        ================================================= */
 
                     const ctx = {
 
+                        /*
+                         * Conexión Baileys
+                         */
                         conn,
 
+
+                        /*
+                         * Prefijo utilizado
+                         */
                         usedPrefix,
 
+
+                        /*
+                         * Comando
+                         */
                         command,
 
+
+                        /*
+                         * Texto después del comando
+                         */
                         text,
 
+
+                        /*
+                         * Argumentos
+                         */
                         args:
                             text
                                 ? text.split(/\s+/)
                                 : [],
 
+
+                        /*
+                         * Grupo
+                         */
                         participants: [],
 
+
+                        /*
+                         * Permisos
+                         */
                         isOwner: false,
 
                         isAdmin: false,
 
                         isBotAdmin: false,
 
-                        quoted
 
+                        /*
+                         * Mensaje citado
+                         */
+                        quoted
                     }
 
 
@@ -351,6 +545,11 @@ export default async function handler(conn, update) {
                         ctx
                     )
 
+
+                    /*
+                     * Solo ejecutar el primer
+                     * plugin que coincida
+                     */
 
                     break
                 }
