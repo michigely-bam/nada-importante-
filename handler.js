@@ -9,7 +9,7 @@ import { getDB } from './lib/db.js'
 import { info, error as logError } from './lib/logger.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const commandsDir = path.join(__dirname, 'commands')
+const commandsDir = path.join(__dirname, 'Plugins')
 
 // comandos: lookup por nombre Y alias -> misma entrada (para el enrutador)
 // listaComandos: solo entradas únicas, en orden -> para mostrar en .menu
