@@ -126,7 +126,9 @@ export default async function handler(conn, update) {
                             : null
                     }
 
-                    await plugin.call(conn, m, ctx)
+                    // Ejecuta el plugin con el formato:
+                    // async (m, { conn, command, text, ... }) => {}
+                    await plugin.call(m, ctx)
 
                     break
                 }
