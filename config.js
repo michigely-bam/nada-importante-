@@ -4,13 +4,13 @@
  */
 export default {
   // Nombre de tu bot
-  nombreBot: 'MI-BOT-MD',
+  nombreBot: 'tomoe-bot',
 
   // Prefijo de comandos (usa '' para que no requiera prefijo)
   prefijo: '.',
 
   // Número del owner/dueño del bot (con código de país, sin +, sin espacios)
-  owner: ['51900000000'],
+  owner: ['51970334698'],
 
   // Número que se usará para vincular el bot vía código de emparejamiento.
   // Déjalo vacío ('') para que el bot lo pida por consola al iniciar.
