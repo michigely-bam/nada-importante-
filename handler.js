@@ -51,7 +51,10 @@ async function loadPlugins() {
             if (module.default) {
                 global.plugins[file] = module.default
                 console.log(`✅ Plugin cargado: ${file}`)
+            } else {
+                console.log(`⚠️ Plugin sin export default: ${file}`)
             }
+
         } catch (error) {
             console.error(`❌ Error cargando ${file}:`, error)
         }
@@ -67,7 +70,10 @@ export default async function handler(conn, update) {
         for (const m of update.messages) {
             try {
                 if (!m?.message) continue
-                if (m.key?.remoteJid === 'status@broadcast') continue
+
+                if (m.key?.remoteJid === 'status@broadcast') {
+                    continue
+                }
 
                 const message =
                     m.message.conversation ||
@@ -92,7 +98,11 @@ export default async function handler(conn, update) {
                 if (!body) continue
 
                 const parts = body.split(/\s+/)
-                const command = parts.shift().toLowerCase()
+
+                const command = parts
+                    .shift()
+                    .toLowerCase()
+
                 const text = parts.join(' ')
 
                 console.log(
@@ -103,42 +113,80 @@ export default async function handler(conn, update) {
                 for (const [filename, plugin] of Object.entries(global.plugins)) {
                     if (!plugin) continue
 
-                    const matched = getCommandMatch(plugin, command)
+                    const matched = getCommandMatch(
+                        plugin,
+                        command
+                    )
 
                     if (!matched) continue
 
-                    console.log(`🔧 Ejecutando plugin: ${filename}`)
+                    console.log(
+                        `🔧 Ejecutando plugin: ${filename}`
+                    )
+
+                    const quotedMessage =
+                        m.message?.extendedTextMessage
+                            ?.contextInfo
+                            ?.quotedMessage
 
                     const ctx = {
                         conn,
+
                         usedPrefix,
+
                         command,
+
                         text,
-                        args: text ? text.split(/\s+/) : [],
+
+                        args: text
+                            ? text.split(/\s+/)
+                            : [],
+
                         participants: [],
+
                         isOwner: false,
+
                         isAdmin: false,
+
                         isBotAdmin: false,
-                        quoted: m.message?.extendedTextMessage?.contextInfo?.quotedMessage
+
+                        quoted: quotedMessage
                             ? {
-                                message: m.message.extendedTextMessage.contextInfo.quotedMessage
+                                message: quotedMessage
                             }
                             : null
                     }
 
-                    // Ejecuta el plugin con el formato:
-                    // async (m, { conn, command, text, ... }) => {}
+                    /*
+                     * IMPORTANTE:
+                     *
+                     * Tus plugins usan:
+                     *
+                     * handler = async (m, { conn, ... })
+                     *
+                     * Por eso se pasan SOLO:
+                     *
+                     * 1. m
+                     * 2. ctx
+                     */
+
                     await plugin.call(m, ctx)
 
                     break
                 }
 
             } catch (error) {
-                console.error('❌ Error procesando mensaje:', error)
+                console.error(
+                    '❌ Error procesando mensaje:',
+                    error
+                )
             }
         }
 
     } catch (error) {
-        console.error('❌ Error general del handler:', error)
+        console.error(
+            '❌ Error general del handler:',
+            error
+        )
     }
 }
