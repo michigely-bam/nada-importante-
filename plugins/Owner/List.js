@@ -1,85 +1,68 @@
 import fs from 'fs'
 import path from 'path'
 
-export default {
-    name: 'dir',
-    alias: ['carpetas', 'ls', 'list'],
-    description: 'Muestra las carpetas y archivos del primer piso',
-    category: 'owner',
-    command: ['dir', 'carpetas'],
+let handler = async (m, { conn, args, usedPrefix }) => {
+    const from = m.key.remoteJid
 
-    async execute(m, { conn, args, usedPrefix }) {
+    try {
+        const ruta = args[0] || './'
 
-        const from = m.chat
+        const items = fs.readdirSync(ruta)
 
-        try {
-
-            // Ruta por defecto: raíz del bot
-            const ruta = args[0] || './'
-
-            // Leer contenido
-            const items = fs.readdirSync(ruta)
-
-            if (items.length === 0) {
-
-                return await conn.sendMessage(
-                    from,
-                    {
-                        text: `📂 La carpeta \`${ruta}\` está vacía`
-                    },
-                    {
-                        quoted: m
-                    }
-                )
-            }
-
-            let lista =
-                `📁 *Contenido de:* \`${ruta}\`\n\n`
-
-            for (const item of items) {
-
-                const fullPath =
-                    path.join(ruta, item)
-
-                try {
-
-                    const stats =
-                        fs.statSync(fullPath)
-
-                    if (stats.isDirectory()) {
-
-                        lista += `📁 *${item}*/\n`
-
-                    } else {
-
-                        lista += `📄 ${item}\n`
-                    }
-
-                } catch {
-
-                    lista += `❓ ${item}\n`
-                }
-            }
-
-            lista +=
-                `\n💡 *Uso:* ${usedPrefix}dir [ruta]` +
-                `\n*Ejemplo:* ${usedPrefix}dir lib`
-
-            await conn.sendMessage(
+        if (items.length === 0) {
+            return await conn.sendMessage(
                 from,
                 {
-                    text: lista
+                    text: `📂 La carpeta \`${ruta}\` está vacía`
                 },
-                {
-                    quoted: m
-                }
+                { quoted: m }
             )
+        }
 
-        } catch (error) {
+        let lista = `📁 *Contenido de:* \`${ruta}\`\n\n`
 
-            await conn.sendMessage(
-                from,
-                {
-                    text:
-                        `❌ *Error:* ${error?.message || error}` +
-                        `\n\nAsegú
+        for (const item of items) {
+            const fullPath = path.join(ruta, item)
+
+            try {
+                const stats = fs.statSync(fullPath)
+
+                if (stats.isDirectory()) {
+                    lista += `📁 *${item}*/\n`
+                } else {
+                    lista += `📄 ${item}\n`
+                }
+            } catch {
+                lista += `❓ ${item}\n`
+            }
+        }
+
+        lista += `\n💡 *Uso:* ${usedPrefix}dir [ruta]`
+        lista += `\n*Ejemplo:* ${usedPrefix}dir plugins`
+
+        await conn.sendMessage(
+            from,
+            {
+                text: lista
+            },
+            { quoted: m }
+        )
+
+    } catch (error) {
+        await conn.sendMessage(
+            from,
+            {
+                text:
+                    `❌ *Error:* ${error?.message || error}` +
+                    `\n\nAsegúrate de que la ruta existe.`
+            },
+            { quoted: m }
+        )
+    }
+}
+
+handler.help = ['dir', 'carpetas', 'ls', 'list']
+handler.tags = ['owner']
+handler.command = ['dir', 'carpetas', 'ls', 'list']
+
+export default handler
