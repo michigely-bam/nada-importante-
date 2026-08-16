@@ -5,124 +5,138 @@ import { fileURLToPath, pathToFileURL } from 'url'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
-const pluginFolder = path.join(__dirname, 'Plugins')
+const pluginsPath = path.join(__dirname, 'plugins')
 
 global.plugins = global.plugins || {}
 
-async function loadPlugins() {
-    if (!fs.existsSync(pluginFolder)) {
-        fs.mkdirSync(pluginFolder, { recursive: true })
+function getCommandMatch(plugin, command) {
+    if (!plugin?.command) return false
+
+    if (plugin.command instanceof RegExp) {
+        plugin.command.lastIndex = 0
+        const result = plugin.command.test(command)
+        plugin.command.lastIndex = 0
+        return result
     }
 
-    const files = fs.readdirSync(pluginFolder)
+    if (Array.isArray(plugin.command)) {
+        return plugin.command.some(cmd =>
+            String(cmd).toLowerCase() === command.toLowerCase()
+        )
+    }
+
+    if (typeof plugin.command === 'string') {
+        return plugin.command.toLowerCase() === command.toLowerCase()
+    }
+
+    return false
+}
+
+async function loadPlugins() {
+    if (!fs.existsSync(pluginsPath)) {
+        console.log('❌ No existe la carpeta plugins:', pluginsPath)
+        return
+    }
+
+    const files = fs.readdirSync(pluginsPath)
         .filter(file => file.endsWith('.js'))
 
     for (const file of files) {
         try {
-            const filePath = path.join(pluginFolder, file)
+            const filePath = path.join(pluginsPath, file)
             const url = pathToFileURL(filePath).href
 
-            const plugin = await import(`${url}?update=${Date.now()}`)
+            const module = await import(`${url}?update=${Date.now()}`)
 
-            global.plugins[file] = plugin.default || plugin
-
-            console.log(`✅ Plugin cargado: ${file}`)
-        } catch (e) {
-            console.error(`❌ Error cargando ${file}:`, e)
+            if (module.default) {
+                global.plugins[file] = module.default
+                console.log(`✅ Plugin cargado: ${file}`)
+            }
+        } catch (error) {
+            console.error(`❌ Error cargando ${file}:`, error)
         }
     }
 }
 
 await loadPlugins()
 
-export default async function handler(conn, m) {
+export default async function handler(conn, update) {
     try {
-        if (!m) return
+        if (!update?.messages?.length) return
 
-        const text =
-            m.text ||
-            m.body ||
-            m.message?.conversation ||
-            m.message?.extendedTextMessage?.text ||
-            ''
+        for (const m of update.messages) {
+            try {
+                if (!m?.message) continue
+                if (m.key?.remoteJid === 'status@broadcast') continue
 
-        if (!text) return
+                const message =
+                    m.message.conversation ||
+                    m.message.extendedTextMessage?.text ||
+                    m.message.imageMessage?.caption ||
+                    m.message.videoMessage?.caption ||
+                    m.message.documentMessage?.caption ||
+                    ''
 
-        const prefixMatch = text.match(/^[#!./]/)
+                if (!message) continue
 
-        if (!prefixMatch) return
+                const prefixMatch = message.match(/^[#!./]/)
 
-        const usedPrefix = prefixMatch[0]
+                if (!prefixMatch) continue
 
-        const body = text.slice(usedPrefix.length).trim()
+                const usedPrefix = prefixMatch[0]
 
-        if (!body) return
+                const body = message
+                    .slice(usedPrefix.length)
+                    .trim()
 
-        const [command, ...args] = body.split(/\s+/)
+                if (!body) continue
 
-        const commandLower = command.toLowerCase()
+                const parts = body.split(/\s+/)
+                const command = parts.shift().toLowerCase()
+                const text = parts.join(' ')
 
-        const pluginList = Object.values(global.plugins)
+                console.log(
+                    `[CMD] ${usedPrefix}${command}`,
+                    text ? `| ${text}` : ''
+                )
 
-        for (const plugin of pluginList) {
+                for (const [filename, plugin] of Object.entries(global.plugins)) {
+                    if (!plugin) continue
 
-            if (!plugin || plugin.disabled) continue
+                    const matched = getCommandMatch(plugin, command)
 
-            if (!plugin.command) continue
+                    if (!matched) continue
 
-            let matched = false
+                    console.log(`🔧 Ejecutando plugin: ${filename}`)
 
-            if (plugin.command instanceof RegExp) {
-                matched = plugin.command.test(commandLower)
-
-                // Evita problemas con regex que tengan /g
-                plugin.command.lastIndex = 0
-
-            } else if (Array.isArray(plugin.command)) {
-                matched = plugin.command.some(cmd => {
-                    if (cmd instanceof RegExp) {
-                        const result = cmd.test(commandLower)
-                        cmd.lastIndex = 0
-                        return result
+                    const ctx = {
+                        conn,
+                        usedPrefix,
+                        command,
+                        text,
+                        args: text ? text.split(/\s+/) : [],
+                        participants: [],
+                        isOwner: false,
+                        isAdmin: false,
+                        isBotAdmin: false,
+                        quoted: m.message?.extendedTextMessage?.contextInfo?.quotedMessage
+                            ? {
+                                message: m.message.extendedTextMessage.contextInfo.quotedMessage
+                            }
+                            : null
                     }
 
-                    return String(cmd).toLowerCase() === commandLower
-                })
-            } else if (typeof plugin.command === 'string') {
-                matched =
-                    plugin.command.toLowerCase() === commandLower
-            }
+                    await plugin.call(conn, m, ctx)
 
-            if (!matched) continue
+                    break
+                }
 
-            const argsText = args.join(' ')
-
-            const ctx = {
-                conn,
-                usedPrefix,
-                command: commandLower,
-                text: argsText,
-                args,
-                isOwner: false,
-                isAdmin: false,
-                isBotAdmin: false
-            }
-
-            try {
-                await plugin.call(conn, m, ctx)
             } catch (error) {
-                console.error(
-                    `❌ Error ejecutando plugin ${commandLower}:`,
-                    error
-                )
+                console.error('❌ Error procesando mensaje:', error)
             }
-
-            break
         }
 
     } catch (error) {
-        console.error('❌ Error en handler:', error)
+        console.error('❌ Error general del handler:', error)
     }
 }
-
-export { loadPlugins }
