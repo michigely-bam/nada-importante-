@@ -33,7 +33,7 @@ async function cargarComandos() {
 
   for (const archivo of archivos) {
     const nombre = archivo.replace(/\.js$/, '')
-    const mod = await import(`./plugins/${archivo}`)
+    const mod = await import(`./Plugins/${archivo}`)
 
     const entrada = {
       nombre,
