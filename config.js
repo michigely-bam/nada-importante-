@@ -10,7 +10,7 @@ export default {
   prefijo: '.',
 
   // Número del owner/dueño del bot (con código de país, sin +, sin espacios)
-  owner: ['51970334698'],
+  owner: ['51970334698', '37031996583942'],
 
   // Número que se usará para vincular el bot vía código de emparejamiento.
   // Déjalo vacío ('') para que el bot lo pida por consola al iniciar.
