@@ -1,653 +1,501 @@
-import fs from 'fs'
-import path from 'path'
-import { fileURLToPath, pathToFileURL } from 'url'
+import { smsg } from "../lib/simple.js";
+import { format } from "util";
+import { fileURLToPath } from "url";
+import path, { join } from "path";
+import fs, { unwatchFile, watchFile } from "fs";
+import chalk from "chalk";
+import fetch from "node-fetch";
+import ws from "ws";
+import { proto } from "@whiskeysockets/baileys";
+const isNumber = x => typeof x === "number" && !isNaN(x);
+const delay = ms => isNumber(ms) && new Promise(resolve => setTimeout(resolve, ms));
+const printModule = await import("../lib/print.js").then(m => m.default).catch(() => null);
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
+const prefixCache = new Map();
+const groupMetadataCache = global.__shadowGroupMetadataCache || (global.__shadowGroupMetadataCache = new Map());
+const GROUP_METADATA_TTL = 30 * 1000;
 
-const pluginsPath = path.join(__dirname, 'plugins')
-
-global.plugins = global.plugins || {}
-global.pluginFiles = global.pluginFiles || new Map()
-
-/* =========================================================
-   BUSCAR PLUGINS RECURSIVAMENTE
-   ========================================================= */
-
-function getPluginFiles(dir, files = []) {
-    if (!fs.existsSync(dir)) return files
-
-    for (const entry of fs.readdirSync(dir, {
-        withFileTypes: true
-    })) {
-        const fullPath = path.join(dir, entry.name)
-
-        if (entry.isDirectory()) {
-            getPluginFiles(fullPath, files)
-            continue
-        }
-
-        if (
-            entry.isFile() &&
-            entry.name.endsWith('.js') &&
-            !entry.name.startsWith('_')
-        ) {
-            files.push(fullPath)
-        }
-    }
-
-    return files
-}
-
-/* =========================================================
-   NOMBRE RELATIVO DEL PLUGIN
-   ========================================================= */
-
-function getPluginName(filePath) {
-    return path
-        .relative(pluginsPath, filePath)
-        .replace(/\\/g, '/')
-}
-
-/* =========================================================
-   BUSCAR COMANDO
-   ========================================================= */
-
-function getCommandMatch(plugin, command) {
-    if (!plugin?.command) return false
-
-    if (plugin.command instanceof RegExp) {
-        plugin.command.lastIndex = 0
-
-        const result =
-            plugin.command.test(command)
-
-        plugin.command.lastIndex = 0
-
-        return result
-    }
-
-    if (Array.isArray(plugin.command)) {
-        return plugin.command.some(cmd =>
-            String(cmd).toLowerCase() ===
-            command.toLowerCase()
-        )
-    }
-
-    if (typeof plugin.command === 'string') {
-        return plugin.command.toLowerCase() ===
-            command.toLowerCase()
-    }
-
-    return false
-}
-
-/* =========================================================
-   CARGAR UN PLUGIN
-   ========================================================= */
-
-async function loadPlugin(filePath) {
+function normalizeJid(jid, conn) {
+    if (!jid) return "";
+    if (typeof jid === "object") jid = jid.phoneNumber || jid.jid || jid.id || jid.lid || "";
+    if (typeof jid !== "string") jid = String(jid || "");
+    if (!jid) return "";
     try {
-        const name = getPluginName(filePath)
-
-        const url =
-            pathToFileURL(filePath).href
-
-        const module =
-            await import(
-                `${url}?update=${Date.now()}`
-            )
-
-        if (!module.default) {
-            console.log(
-                `⚠️ Plugin sin export default: ${name}`
-            )
-            return
-        }
-
-        global.plugins[name] =
-            module.default
-
-        const stat =
-            fs.statSync(filePath)
-
-        global.pluginFiles.set(name, {
-            path: filePath,
-            mtime: stat.mtimeMs
-        })
-
-        console.log(
-            `✅ Plugin cargado: ${name}`
-        )
-
-    } catch (error) {
-        console.error(
-            `❌ Error cargando plugin ${filePath}:`,
-            error
-        )
-    }
+        jid = conn?.decodeJid?.(jid) || jid;
+    } catch { }
+    return jid.trim().replace(/:\d+@/, "@").toLowerCase();
 }
 
-/* =========================================================
-   CARGAR TODOS LOS PLUGINS
-   ========================================================= */
+function jidNumber(jid, conn) {
+    const normalized = normalizeJid(jid, conn);
+    if (!normalized || normalized.endsWith("@lid")) return "";
+    return normalized.split("@")[0].replace(/\D/g, "");
+}
 
-async function loadPlugins(force = false) {
+function rawNumber(value) {
+    const raw = Array.isArray(value) ? value[0] : value;
+    return String(raw || "").replace(/\D/g, "");
+}
 
-    if (!fs.existsSync(pluginsPath)) {
-        console.log(
-            `❌ No existe la carpeta: ${pluginsPath}`
-        )
-        return
+function identityNumbers(jids, conn) {
+    return new Set((jids || []).map(jid => jidNumber(jid, conn)).filter(Boolean));
+}
+
+function matchesNumberList(jids, list, conn) {
+    const numbers = identityNumbers(jids, conn);
+    return (list || []).some(entry => {
+        const number = rawNumber(entry);
+        return number && numbers.has(number);
+    });
+}
+
+function participantIds(participant) {
+    if (!participant) return [];
+    return [
+        participant.id,
+        participant.jid,
+        participant.lid,
+        participant.phoneNumber,
+        participant.pn,
+        participant.phone
+    ].filter(Boolean);
+}
+
+function messageIds(m) {
+    return [
+        m?.sender,
+        m?.participant,
+        m?.key?.participantAlt,
+        m?.key?.remoteJidAlt,
+        m?.key?.participant,
+        m?.key?.remoteJid
+    ].filter(Boolean);
+}
+
+function sameIdentity(a, b, conn) {
+    const na = normalizeJid(a, conn);
+    const nb = normalizeJid(b, conn);
+    if (!na || !nb) return false;
+    if (na === nb) return true;
+    const aa = jidNumber(na, conn);
+    const bb = jidNumber(nb, conn);
+    return !!aa && !!bb && aa === bb;
+}
+
+function findParticipant(participants, candidates, conn) {
+    if (!Array.isArray(participants) || !participants.length) return {};
+    const cleanCandidates = (candidates || []).filter(Boolean);
+    return participants.find(p => participantIds(p).some(id => cleanCandidates.some(candidate => sameIdentity(id, candidate, conn)))) || {};
+}
+
+function normalizeParticipant(participant, conn) {
+    if (!participant) return participant;
+    const id = participant.id || participant.jid || participant.phoneNumber || participant.lid || "";
+    const phoneNumber = participant.phoneNumber || (!normalizeJid(id, conn).endsWith("@lid") ? id : undefined);
+    return {
+        ...participant,
+        jid: participant.jid || phoneNumber || participant.id || participant.lid,
+        phoneNumber
+    };
+}
+
+async function getGroupMetadataCached(conn, jid) {
+    if (!jid?.endsWith("@g.us")) return { participants: [] };
+    const now = Date.now();
+    const cached = groupMetadataCache.get(jid);
+    if (cached && now - cached.ts < GROUP_METADATA_TTL) return cached.data;
+
+    const stored = conn?.chats?.[jid]?.metadata;
+    if (stored?.participants?.length) {
+        groupMetadataCache.set(jid, { ts: now, data: stored });
+        return stored;
     }
 
-    const files =
-        getPluginFiles(pluginsPath)
+    const metadata = await conn.groupMetadata(jid).catch(() => stored || { id: jid, participants: [] });
+    const safeMetadata = metadata || { id: jid, participants: [] };
+    if (safeMetadata?.participants?.length) {
+        if (!conn.chats[jid]) conn.chats[jid] = { id: jid };
+        conn.chats[jid].metadata = safeMetadata;
+    }
+    groupMetadataCache.set(jid, { ts: now, data: safeMetadata });
+    return safeMetadata;
+}
 
-    const currentFiles =
-        new Set(
-            files.map(getPluginName)
-        )
+function isAdminParticipant(participant) {
+    return participant?.admin === "admin" || participant?.admin === "superadmin" || participant?.isAdmin === true || participant?.isSuperAdmin === true;
+}
 
-    /* Eliminar plugins borrados */
+export async function handler(chatUpdate) {
+    this.msgqueque = this.msgqueque || [];
+    this.uptime = this.uptime || Date.now();
+    if (!chatUpdate) return;
+    this.pushMessage(chatUpdate.messages).catch(console.error);
+    let m = chatUpdate.messages[chatUpdate.messages.length - 1];
+    if (!m) return;
+    if (global.db.data == null) await global.loadDatabase();
+    m = smsg(this, m) || m;
+    if (!m) return;
 
-    for (
-        const name of Object.keys(global.plugins)
-    ) {
-        if (!currentFiles.has(name)) {
+    let prefixRegex = global.prefix;
+    let usedPrefix = global.prefix || "";
+    const senderNumber = (this.user.jid || this.user.id || '').split('@')[0].replace(/:\d+$/, '');
+    if (!prefixCache.has(senderNumber)) {
+        const botPath = path.join('./Sessions/SubBot', senderNumber);
+        const configPath = path.join(botPath, 'config.json');
+        try {
+            if (fs.existsSync(configPath)) {
+                const config = JSON.parse(fs.readFileSync(configPath));
+                if (config.prefix) {
+                    prefixRegex = config.prefix === 'multi'
+                        ? /^[#$@*&?,;:+×!_\-.]/
+                        : new RegExp(`^(${[...config.prefix].map(c => c.replace(/([.*+?^${}()|\[\]\\])/g, '\\$1')).join('|')})`);
+                    prefixCache.set(senderNumber, prefixRegex);
+                }
+            }
+        } catch (e) {
+            console.error('🍁 Error cargando prefijo del subbot:', e);
+        }
+    } else {
+        prefixRegex = prefixCache.get(senderNumber) || global.prefix;
+    }
 
-            delete global.plugins[name]
+    m.exp = 0;
+    m.coin = false;
 
-            global.pluginFiles.delete(name)
+    const user = global.db.data.users[m.sender] || (global.db.data.users[m.sender] = {
+        name: m.name,
+        exp: 0,
+        coin: 0,
+        bank: 0,
+        level: 0,
+        health: 100,
+        genre: "",
+        birth: "",
+        marry: "",
+        description: "",
+        packstickers: null,
+        premium: false,
+        premiumTime: 0,
+        banned: false,
+        bannedReason: "",
+        commands: 0,
+        afk: -1,
+        afkReason: "",
+        warn: 0
+    });
 
-            console.log(
-                `🗑️ Plugin eliminado: ${name}`
-            )
+    const chat = global.db.data.chats[m.chat] || (global.db.data.chats[m.chat] = {
+        isBanned: false,
+        welcome: true,
+        sWelcome: "",
+        sBye: "",
+        detect: true,
+        primaryBot: null,
+        modoadmin: false,
+        antiLink: true,
+        nsfw: false,
+        economy: true,
+        gacha: true
+    });
+
+    if (chat.isBanned) {
+        const textLower = m.text?.toLowerCase() || '';
+        if (
+            !textLower.startsWith('.unbanchat') &&
+            !textLower.startsWith('/unbanchat') &&
+            !textLower.startsWith('!unbanchat') &&
+            !textLower.startsWith('.desbanearbot') &&
+            !textLower.startsWith('/desbanearbot') &&
+            !textLower.startsWith('!desbanearbot')
+        ) {
+            return;
         }
     }
 
-    /* Cargar / actualizar plugins */
+    const settings = global.db.data.settings[this.user.jid] || (global.db.data.settings[this.user.jid] = {
+        self: false,
+        restrict: true,
+        jadibotmd: true,
+        antiPrivate: false,
+        gponly: false
+    });
 
-    for (const filePath of files) {
+    if (typeof m.text !== "string") m.text = "";
 
-        const name =
-            getPluginName(filePath)
+    const nuevoNombre = m.pushName || await this.getName(m.sender);
+    if (typeof nuevoNombre === "string" && nuevoNombre.trim() && nuevoNombre !== user.name) {
+        user.name = nuevoNombre;
+    }
+
+    const conn = m.conn || global.conn;
+    const groupMetadata = m.isGroup ? await getGroupMetadataCached(this, m.chat) : { participants: [] };
+    const participants = m.isGroup ? (groupMetadata.participants || []).map(p => normalizeParticipant(p, this)) : [];
+
+    const senderCandidates = messageIds(m);
+    const botCandidates = [this.user?.jid, this.user?.id, this.user?.lid, this.user?.phoneNumber, this.user?.pn].filter(Boolean);
+    const userGroup = m.isGroup ? findParticipant(participants, senderCandidates, this) : {};
+    const botGroup = m.isGroup ? findParticipant(participants, botCandidates, this) : {};
+
+    const senderIdentity = [...senderCandidates, ...participantIds(userGroup)];
+    const isROwner = matchesNumberList(senderIdentity, global.owner, this);
+    const isOwner = isROwner || m.fromMe;
+    const isMods = isROwner || matchesNumberList(senderIdentity, global.mods, this);
+    const isPrems = isROwner || matchesNumberList(senderIdentity, global.prems, this) || user.premium;
+
+    if (opts["nyimak"]) return;
+    if (!m.fromMe && !isMods && settings.self) return;
+    if (!m.fromMe && !isMods && settings.gponly && !m.chat.endsWith("g.us") && !/code|p|ping|qr|estado|status|infobot|botinfo|report|reportar|invite|join|logout|suggest|help|menu/gim.test(m.text)) return;
+    if (opts["swonly"] && m.chat !== "status@broadcast") return;
+    if (m.isBaileys) return;
+
+    const delPrimaryRegex = prefixRegex instanceof RegExp
+        ? new RegExp(`${prefixRegex.source}delprimary\\b`, prefixRegex.flags)
+        : /^delprimary\b/i;
+    const isDelPrimaryCommand = typeof m.text === "string" && delPrimaryRegex.test(m.text);
+
+    if (chat.primaryBot && !sameIdentity(chat.primaryBot, this.user.jid || this.user.id, this) && !isDelPrimaryCommand) {
+        const primaryBotInGroup = participants.some(p => participantIds(p).some(id => sameIdentity(id, chat.primaryBot, this)));
+        const primaryBotConn = (global.conns || []).find(sock => sameIdentity(sock?.user?.jid || sock?.user?.id, chat.primaryBot, sock) && sock.ws?.socket?.readyState !== ws.CLOSED);
+        if (primaryBotConn && primaryBotInGroup) return;
+        chat.primaryBot = null;
+    }
+
+    if (m.text && !(isMods || isPrems)) {
+        this.msgqueque.push(m.id || m.key.id);
+        if (this.msgqueque.length > 1) {
+            await delay(500);
+        }
+        const quequeIndex = this.msgqueque.indexOf(m.id || m.key.id);
+        if (quequeIndex !== -1) this.msgqueque.splice(quequeIndex, 1);
+    }
+
+    m.exp += Math.ceil(Math.random() * 10);
+
+    const isRAdmin = userGroup?.admin === "superadmin" || userGroup?.isSuperAdmin === true;
+    const isAdmin = isAdminParticipant(userGroup);
+    const isBotAdmin = isAdminParticipant(botGroup);
+
+    const ___dirname = path.join(path.dirname(fileURLToPath(import.meta.url)), "../plugins");
+    for (const name in global.plugins) {
+        const plugin = global.plugins[name];
+        if (!plugin || plugin.disabled) continue;
+
+        const pluginPrefix = plugin.customPrefix || prefixRegex || conn.prefix || global.prefix;
+        const match = (pluginPrefix instanceof RegExp
+            ? [[pluginPrefix.exec(m.text), pluginPrefix]]
+            : Array.isArray(pluginPrefix)
+            ? pluginPrefix.map(p => [p instanceof RegExp ? p : new RegExp(p.replace(/[.*+?^${}()|\[\]\\]/g, '\\$1')).exec(m.text), p])
+            : typeof pluginPrefix === "string"
+            ? [[new RegExp(pluginPrefix.replace(/[.*+?^${}()|\[\]\\]/g, '\\$&')).exec(m.text), new RegExp(pluginPrefix)]]
+            : [[[], new RegExp]]).find(p => p[1]);
+
+        if (typeof plugin.all === "function") {
+            await plugin.all.call(this, m, { chatUpdate, __dirname, __filename: join(___dirname, name), user, chat, settings });
+        }
+
+        if (!opts["restrict"] && plugin.tags?.includes("admin")) continue;
+
+        if (typeof plugin.before === "function") {
+            if (await plugin.before.call(this, m, {
+                match,
+                conn: this,
+                participants,
+                groupMetadata,
+                user: userGroup,
+                bot: botGroup,
+                isROwner,
+                isOwner,
+                isMods,
+                isRAdmin,
+                isAdmin,
+                isBotAdmin,
+                isPrems,
+                chatUpdate,
+                __dirname,
+                __filename: join(___dirname, name),
+                chat,
+                settings
+            })) continue;
+        }
+
+        usedPrefix = (match[0] || "")[0];
+        if (!usedPrefix) continue;
+
+        const noPrefix = m.text.replace(usedPrefix, "");
+        let [command, ...args] = noPrefix.trim().split(" ").filter(v => v);
+        args = args || [];
+        const text = args.join(" ");
+        command = (command || "").toLowerCase();
+        const isAccept = plugin.command instanceof RegExp
+            ? plugin.command.test(command)
+            : Array.isArray(plugin.command)
+            ? plugin.command.some(cmd => cmd instanceof RegExp ? cmd.test(command) : cmd === command)
+            : typeof plugin.command === "string"
+            ? plugin.command === command
+            : false;
+
+        if (!isAccept) continue;
+        global.comando = command;
+
+        if (chat.isBanned && !isMods && name !== "group-banchat.js") {
+            if (!chat.primaryBot || chat.primaryBot === this.user.jid) {
+                await this.reply(m.chat, `ꕥ El bot *${settings.botname}* está desactivado en este grupo\n\n> ✦ Un *administrador* puede activarlo con el comando:\n> » *${usedPrefix}bot on*`, m);
+                return;
+            }
+        }
+
+        if (user.banned && !isMods && m.text) {
+            if (!chat.primaryBot || chat.primaryBot === this.user.jid) {
+                await this.reply(m.chat, `ꕥ Estas baneado/a, no puedes usar comandos en este bot!\n\n> ● *Razón ›* ${user.bannedReason}\n\n> ● Si este Bot es cuenta oficial y tienes evidencia que respalde que este mensaje es un error, puedes exponer tu caso con un moderador.`, m);
+                return;
+            }
+        }
+
+        if (chat.modoadmin && !isOwner && m.isGroup && !isAdmin && (plugin.botAdmin || plugin.admin || plugin.group)) return;
+
+        if (plugin.rowner && !isROwner) {
+            global.dfail("rowner", m, this);
+            continue;
+        }
+        if (plugin.owner && !isOwner) {
+            global.dfail("owner", m, this);
+            continue;
+        }
+        if (plugin.mods && !isMods) {
+            global.dfail("mods", m, this);
+            continue;
+        }
+        if (plugin.premium && !isPrems) {
+            global.dfail("premium", m, this);
+            continue;
+        }
+        if (plugin.group && !m.isGroup) {
+            global.dfail("group", m, this);
+            continue;
+        }
+
+        if (plugin.admin && !isAdmin) {
+            global.dfail("admin", m, this);
+            continue;
+        }
+        
+        if (plugin.botAdmin && !isBotAdmin) {
+            global.dfail("botAdmin", m, this);
+            continue;
+        }
+        if (plugin.private && m.isGroup) {
+            global.dfail("private", m, this);
+            continue;
+        }
+
+        if (plugin.coin && isNumber(plugin.coin) && plugin.coin > 0) {
+            if (user.coin < plugin.coin) {
+                await this.reply(m.chat, `ꕥ No tienes suficientes *${global.currency}* para usar este comando. Necesitas ${plugin.coin} *${global.currency}*, pero tienes ${user.coin} *${global.currency}*.`, m);
+                continue;
+            }
+            user.coin -= plugin.coin;
+            await this.reply(m.chat, `> ꕥ Se cobraran ${plugin.coin} *${global.currency}* por usar el comando *${usedPrefix}${command}*.\n> » *_Saldo actual: ${user.coin} ${global.currency}._*`, m);
+        }
+
+        m.isCommand = true;
+        m.exp += plugin.exp ? parseInt(plugin.exp) : 10;
+
+        const audioCommands = new Set(['play', 'play2', 'playch', 'ytmp3', 'ytmp4', 'playvid', 'ytv', 'yt', 'spotify', 'spdl', 'audivd', 'cancion', 'canción', 'say', 'decir', 'tiktoks', 'tiktoksearch', 'ttss', 'ptvsearch', 'ptvtt', 'ttptv', 'shazam', 'whatmusic']);
+        try {
+            if (this.sendPresenceUpdate) {
+                await this.sendPresenceUpdate(audioCommands.has(command) ? 'recording' : 'composing', m.chat);
+            }
+            if (this.readMessages && m.key) {
+                await this.readMessages([m.key]);
+            }
+        } catch (e) {
+            console.error('Error en presencia/lectura:', e);
+        }
 
         try {
-            const stat =
-                fs.statSync(filePath)
+            await plugin.call(this, m, {
+                match,
+                usedPrefix,
+                noPrefix,
+                args,
+                command,
+                text,
+                conn: this,
+                participants,
+                groupMetadata,
+                user: userGroup,
+                bot: botGroup,
+                isROwner,
+                isOwner,
+                isMods,
+                isRAdmin,
+                isAdmin,
+                isBotAdmin,
+                isPrems,
+                chatUpdate,
+                __dirname,
+                __filename: join(___dirname, name),
+                chat,
+                settings
+            });
 
-            const old =
-                global.pluginFiles.get(name)
-
-            if (
-                force ||
-                !old ||
-                old.mtime !== stat.mtimeMs
-            ) {
-                await loadPlugin(filePath)
+            if (typeof plugin.after === "function") {
+                await plugin.after.call(this, m, {
+                    match,
+                    usedPrefix,
+                    noPrefix,
+                    args,
+                    command,
+                    text,
+                    conn: this,
+                    participants,
+                    groupMetadata,
+                    user: userGroup,
+                    bot: botGroup,
+                    isROwner,
+                    isOwner,
+                    isMods,
+                    isRAdmin,
+                    isAdmin,
+                    isBotAdmin,
+                    isPrems,
+                    chatUpdate,
+                    __dirname,
+                    __filename: join(___dirname, name),
+                    chat,
+                    settings
+                });
             }
 
-        } catch (error) {
-            console.error(
-                `❌ Error revisando ${name}:`,
-                error
-            )
+            if (isAccept) user.commands = (user.commands || 0) + 1;
+        } catch (err) {
+            m.error = err;
+            console.error(err);
         }
     }
+
+    if (m.sender && user) user.exp += m.exp;
+    if (!opts["noprint"] && m.isCommand) await printModule?.(m, this).catch(err => console.warn(err));
 }
 
-/* =========================================================
-   RELOAD MANUAL
-   ========================================================= */
-
-global.reloadPlugins = async () => {
-
-    console.log(
-        '🔄 Recargando plugins...'
-    )
-
-    await loadPlugins(true)
-
-    console.log(
-        `✅ Plugins activos: ${
-            Object.keys(global.plugins).length
-        }`
-    )
-}
-
-/* =========================================================
-   RESTART
-   ========================================================= */
-
-global.restartBot = () => {
-
-    console.log(
-        '🔄 Reiniciando Tomoe...'
-    )
-
-    setTimeout(() => {
-        process.exit(0)
-    }, 500)
-}
-
-/* =========================================================
-   CARGA INICIAL
-   ========================================================= */
-
-await loadPlugins()
-
-/* =========================================================
-   HOT RELOAD
-   ========================================================= */
-
-let lastScan = 0
-
-async function hotReload() {
-
-    const now = Date.now()
-
-    if (now - lastScan < 1500) {
-        return
-    }
-
-    lastScan = now
-
-    await loadPlugins(false)
-}
-
-/* =========================================================
-   OBTENER TEXTO
-   ========================================================= */
-
-function getMessageText(m) {
-
-    return (
-        m?.message?.conversation ||
-        m?.message?.extendedTextMessage?.text ||
-        m?.message?.imageMessage?.caption ||
-        m?.message?.videoMessage?.caption ||
-        m?.message?.documentMessage?.caption ||
-        m?.message?.buttonsResponseMessage
-            ?.selectedButtonId ||
-        m?.message?.listResponseMessage
-            ?.singleSelectReply
-            ?.selectedRowId ||
-        m?.message?.templateButtonReplyMessage
-            ?.selectedId ||
-        ''
-    )
-}
-
-/* =========================================================
-   CREAR CONTEXTO
-   ========================================================= */
-
-function createContext(
-    conn,
-    m,
-    usedPrefix,
-    command,
-    text,
-    quoted
-) {
-
-    const args =
-        text
-            ? text.split(/\s+/)
-            : []
-
-    return {
-        conn,
-        sock: conn,
-
-        msg: m,
-        m,
-
-        usedPrefix,
-        prefix: usedPrefix,
-
-        command,
-
-        text,
-        body: text,
-        args,
-
-        quoted,
-
-        chat: m.chat,
-        sender: m.sender,
-
-        pushName:
-            m.pushName ||
-            '',
-
-        isGroup:
-            m.isGroup || false,
-
-        participants: [],
-
-        isOwner: false,
-        isAdmin: false,
-        isBotAdmin: false
-    }
-}
-
-/* =========================================================
-   EJECUTAR PLUGIN
-   ========================================================= */
-
-async function executePlugin(
-    plugin,
-    m,
-    ctx
-) {
-
-    /*
-     * FORMATO 1
-     *
-     * export default async function (m, ctx) {}
-     */
-
-    if (typeof plugin === 'function') {
-
-        return await plugin(
-            m,
-            ctx
-        )
-    }
-
-    /*
-     * FORMATO 2
-     *
-     * export default {
-     *     command: ['ping'],
-     *
-     *     async execute(m, ctx) {}
-     * }
-     */
-
-    if (
-        plugin &&
-        typeof plugin.execute === 'function'
-    ) {
-
-        return await plugin.execute(
-            m,
-            ctx
-        )
-    }
-
-    /*
-     * FORMATO 3
-     *
-     * handler()
-     */
-
-    if (
-        plugin &&
-        typeof plugin.handler === 'function'
-    ) {
-
-        return await plugin.handler(
-            m,
-            ctx
-        )
-    }
-
-    throw new Error(
-        'El plugin no tiene execute(), handler() ni es una función'
-    )
-}
-
-/* =========================================================
-   HANDLER
-   ========================================================= */
-
-export default async function handler(
-    conn,
-    update
-) {
-
-    try {
-
-        if (!update?.messages?.length) {
-            return
-        }
-
-        await hotReload()
-
-        for (
-            const m
-            of update.messages
-        ) {
-
-            try {
-
-                if (!m?.message) {
-                    continue
-                }
-
-                /* ==============================
-                   DATOS DEL MENSAJE
-                   ============================== */
-
-                m.chat =
-                    m.key?.remoteJid || ''
-
-                m.sender =
-                    m.key?.participant ||
-                    m.key?.remoteJid ||
-                    ''
-
-                m.fromMe =
-                    !!m.key?.fromMe
-
-                m.isGroup =
-                    m.chat.endsWith('@g.us')
-
-                if (!m.chat) {
-                    continue
-                }
-
-                /* ==============================
-                   STATUS
-                   ============================== */
-
-                if (
-                    m.chat ===
-                    'status@broadcast'
-                ) {
-                    continue
-                }
-
-                /* ==============================
-                   TEXTO
-                   ============================== */
-
-                const message =
-                    getMessageText(m)
-
-                if (!message) {
-                    continue
-                }
-
-                /* ==============================
-                   PREFIJO
-                   ============================== */
-
-                const prefixMatch =
-                    message.match(/^[#!./]/)
-
-                if (!prefixMatch) {
-                    continue
-                }
-
-                const usedPrefix =
-                    prefixMatch[0]
-
-                /* ==============================
-                   BODY
-                   ============================== */
-
-                const body =
-                    message
-                        .slice(
-                            usedPrefix.length
-                        )
-                        .trim()
-
-                if (!body) {
-                    continue
-                }
-
-                /* ==============================
-                   COMMAND
-                   ============================== */
-
-                const parts =
-                    body.split(/\s+/)
-
-                const command =
-                    parts
-                        .shift()
-                        .toLowerCase()
-
-                const text =
-                    parts.join(' ')
-
-                console.log(
-                    `[CMD] ${usedPrefix}${command}`,
-                    text
-                        ? `| ${text}`
-                        : ''
-                )
-
-                /* ==============================
-                   BUSCAR PLUGIN
-                   ============================== */
-
-                let found = false
-
-                for (
-                    const [
-                        filename,
-                        plugin
-                    ]
-                    of Object.entries(
-                        global.plugins
-                    )
-                ) {
-
-                    if (!plugin) {
-                        continue
-                    }
-
-                    if (
-                        !getCommandMatch(
-                            plugin,
-                            command
-                        )
-                    ) {
-                        continue
-                    }
-
-                    found = true
-
-                    console.log(
-                        `🔧 Ejecutando plugin: ${filename}`
-                    )
-
-                    /* ==========================
-                       QUOTED
-                       ========================== */
-
-                    const quotedMessage =
-                        m.message
-                            ?.extendedTextMessage
-                            ?.contextInfo
-                            ?.quotedMessage
-
-                    const quoted =
-                        quotedMessage
-                            ? {
-                                message:
-                                    quotedMessage
-                            }
-                            : null
-
-                    /* ==========================
-                       CONTEXTO
-                       ========================== */
-
-                    const ctx =
-                        createContext(
-                            conn,
-                            m,
-                            usedPrefix,
-                            command,
-                            text,
-                            quoted
-                        )
-
-                    /* ==========================
-                       EJECUTAR
-                       ========================== */
-
-                    try {
-
-                        await executePlugin(
-                            plugin,
-                            m,
-                            ctx
-                        )
-
-                    } catch (error) {
-
-                        console.error(
-                            `❌ Error en ${filename}:`,
-                            error
-                        )
-
-                        try {
-
-                            await conn.sendMessage(
-                                m.chat,
-                                {
-                                    text:
-                                        `❌ Error ejecutando el comando.\n\n${error?.message || error}`
-                                },
-                                {
-                                    quoted: m
-                                }
-                            )
-
-                        } catch {}
-                    }
-
-                    break
-                }
-
-                if (!found) {
-                    console.log(
-                        `⚠️ Comando no encontrado: ${command}`
-                    )
-                }
-
-            } catch (error) {
-
-                console.error(
-                    '❌ Error procesando mensaje:',
-                    error
-                )
-            }
-        }
-
-    } catch (error) {
-
-        console.error(
-            '❌ Error general del handler:',
-            error
-        )
-    }
-}
+global.dfail = (type, m, conn) => {
+    const msg = {
+        rowner: `> 〄 El comando *${global.comando}* solo puede ser usado por los creadores del bot.`,
+        owner: `> 〄 El comando *${global.comando}* solo puede ser usado por los desarrolladores del bot.`,
+        mods: `> 〄 El comando *${global.comando}* solo puede ser usado por los moderadores del bot.`,
+        premium: `> 〄 El comando *${global.comando}* solo puede ser usado por los usuarios premium.`,
+        group: `> 〄 El comando *${global.comando}* solo puede ser usado en grupos.`,
+        private: `> 〄 El comando *${global.comando}* solo puede ser usado al chat privado del bot.`,
+        admin: `> 〄 El comando *${global.comando}* solo puede ser usado por los administradores del grupo.`,
+        botAdmin: `> 〄 Para ejecutar el comando *${global.comando}* debo ser administrador del grupo.`,
+        restrict: `> 〄 Esta característica está desactivada.`
+    }[type];
+    if (msg) return conn.reply(m.chat, msg, m).then(() => m.react('✖️'));
+};
+
+let file = global.__filename(import.meta.url, true);
+watchFile(file, async () => {
+    unwatchFile(file);
+    console.log(chalk.magenta("Se actualizó 'handler.js'"));
+    import(`${file}?update=${Date.now()}`);
+});
